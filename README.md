@@ -45,15 +45,56 @@ Pick a model / host:
 collama --model llama3.1 --host http://localhost:11434
 ```
 
-### Slash commands inside the REPL
+## First run
 
-- `/help` — list commands
-- `/model <name>` — swap model mid-session
-- `/clear` — reset conversation history
-- `/tools` — list available tools
-- `/exit` — quit
+The first time you start Collama it asks which model to use, lists what's
+already installed via Ollama, and saves your choice to
+`~/.config/collama/config.json` (chmod 600). On subsequent runs it just uses
+the saved model unless you override it.
 
-## Tools the model can call
+You can wipe the saved config and start fresh with:
+
+```bash
+collama --reset-config
+```
+
+## Slash commands inside the REPL
+
+```
+/help                   show help
+/tools                  list tools the model can call
+/model [name]           show or switch model (saved)
+/models                 list locally installed Ollama models
+/host [url]             show or change the Ollama host (saved)
+/config                 show current config (token redacted)
+/set <key> <value>      set a config value (e.g. /set temperature 0.5)
+/login github <token>   save a GitHub Personal Access Token
+/logout github          remove the saved GitHub token
+/whoami                 show authenticated GitHub user
+/clear                  reset conversation history
+/yolo                   toggle auto-approve for tool calls
+/exit                   quit
+```
+
+## GitHub integration
+
+Generate a fine-grained Personal Access Token at
+<https://github.com/settings/tokens> (give it the scopes you want — `repo`
+for private repos, `read:user`, etc.), then inside the REPL:
+
+```
+/login github ghp_xxxxxxxxxxxxxxxxxxxxx
+/whoami
+```
+
+Or set `GITHUB_TOKEN` / `GH_TOKEN` in your environment.
+
+Once logged in, the model can call: `gh_whoami`, `gh_list_repos`,
+`gh_get_repo`, `gh_get_file`, `gh_list_issues`, `gh_create_issue`,
+`gh_list_pulls`, `gh_get_pull`, `gh_search_code`, and `github_api`
+(raw escape hatch). Mutating calls always ask for approval unless `--yolo`.
+
+## Local tools the model can call
 
 | Tool | Purpose |
 | --- | --- |
@@ -64,7 +105,8 @@ collama --model llama3.1 --host http://localhost:11434
 | `grep` | Regex search across the workspace |
 | `run_bash` | Execute a shell command (asks for approval) |
 
-By default, file-mutating and shell tools require interactive approval. Pass `--yolo` to auto-approve everything (use with care).
+File-mutating and shell tools require interactive approval. Pass `--yolo` (or
+`/yolo`) to auto-approve everything — use with care.
 
 ## License
 

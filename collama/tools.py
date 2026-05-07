@@ -34,6 +34,7 @@ def _resolve(path: str, root: Path) -> Path:
 class ToolContext:
     root: Path
     yolo: bool = False
+    github_token: str | None = None
 
     def confirm(self, action: str, detail: str) -> bool:
         if self.yolo:
@@ -290,8 +291,18 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 ]
 
 
+def _all_tools() -> dict[str, ToolFn]:
+    from .github import GITHUB_TOOLS
+    return {**TOOLS, **GITHUB_TOOLS}
+
+
+def all_tool_schemas() -> list[dict]:
+    from .github import GITHUB_TOOL_SCHEMAS
+    return TOOL_SCHEMAS + GITHUB_TOOL_SCHEMAS
+
+
 def dispatch(name: str, args: dict, ctx: ToolContext) -> str:
-    fn = TOOLS.get(name)
+    fn = _all_tools().get(name)
     if fn is None:
         return f"ERROR: unknown tool '{name}'"
     try:

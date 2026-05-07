@@ -6,7 +6,7 @@ from pathlib import Path
 
 from . import ui
 from .ollama_client import OllamaClient, OllamaError
-from .tools import TOOL_SCHEMAS, ToolContext, dispatch
+from .tools import ToolContext, all_tool_schemas, dispatch
 
 SYSTEM_PROMPT = """You are Collama, a terminal-based coding assistant running on the user's machine via Ollama.
 
@@ -55,6 +55,12 @@ class Agent:
         if name == "run_bash":
             cmd = str(args.get("command", ""))
             return cmd if len(cmd) < 80 else cmd[:77] + "…"
+        if name.startswith("gh_") or name == "github_api":
+            bits = []
+            for k in ("repo", "path", "number", "query", "method"):
+                if k in args:
+                    bits.append(f"{k}={args[k]}")
+            return " ".join(bits)
         return ""
 
     def turn(self, user_input: str) -> str:
@@ -66,7 +72,7 @@ class Agent:
                 msg = self.client.chat(
                     model=self.model,
                     messages=self.messages,
-                    tools=TOOL_SCHEMAS,
+                    tools=all_tool_schemas(),
                     options=self._options(),
                 )
             except OllamaError as e:
