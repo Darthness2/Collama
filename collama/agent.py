@@ -450,6 +450,29 @@ class Agent:
             raw_content = (msg.get("content") or "").strip()
             content = self._render_meta(raw_content).strip()
 
+            # Some models (qwen, llama variants) emit tool calls as JSON inside
+            # `content` instead of using the native tool_calls field. Salvage
+            # those so the agent doesn't stall with the JSON in the answer panel.
+            if not tool_calls and content:
+                extracted = _extract_tool_call(content)
+                if extracted:
+                    name, args, start, end = extracted
+                    preamble = content[:start].strip()
+                    if preamble:
+                        print(ui.color("  ▪ ", ui.TEAL_DIM) + ui.color(preamble, ui.MUTED))
+                    ui.tool_call(name, self._summarize_args(name, args))
+                    result = dispatch(name, args, self.ctx)
+                    ok = not result.startswith("ERROR")
+                    first_line = result.splitlines()[0] if result else ""
+                    ui.tool_result(first_line[:160], ok=ok)
+                    # Use a user-role message; "tool" role is only valid in
+                    # response to a native tool_calls entry.
+                    self.messages.append({
+                        "role": "user",
+                        "content": f"Tool result for {name}:\n{result}",
+                    })
+                    continue
+
             if content and not tool_calls:
                 ui.assistant(content)
                 return self._finish(content)
