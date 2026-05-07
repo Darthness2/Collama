@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import Any, Iterator, Literal
 
 from . import ui
+from .background import BackgroundExecutor
 from .config import set_value
 from .ollama_client import OllamaClient, OllamaError, ToolsUnsupportedError
 from .permissions import CONCURRENT_SAFE, Resolver, auto_deny_resolver, can_use_tool
@@ -59,7 +60,7 @@ from .services.compact import (
 )
 from .services.transcript import record as record_transcript
 from .state import AppState
-from .tasks import TaskKind, new_id
+from .tasks import TaskGraph, TaskKind, new_id
 from .tools import ToolContext, all_tool_schemas, dispatch
 
 
@@ -342,10 +343,16 @@ class StreamingToolExecutor:
         state: AppState,
         resolver: Resolver,
         max_workers: int = 4,
+        engine: object | None = None,
+        background: object | None = None,
+        tasks: object | None = None,
     ) -> None:
         self.state = state
         self.resolver = resolver
         self.max_workers = max_workers
+        self.engine = engine
+        self.background = background
+        self.tasks = tasks
 
     def execute(self, calls: list[tuple[str, dict, str]]) -> Iterator[Message]:
         if not calls:
@@ -385,7 +392,13 @@ class StreamingToolExecutor:
             }, task_id=tid))
             return events
 
-        ctx = ToolContext(**self.state.to_tool_ctx_kwargs())
+        ctx = ToolContext(
+            **self.state.to_tool_ctx_kwargs(),
+            state=self.state,
+            engine=self.engine,
+            background=self.background,
+            tasks=self.tasks,
+        )
         try:
             result = dispatch(name, args, ctx)
         except Exception as e:
@@ -424,7 +437,12 @@ class QueryEngine:
         self.session_id = session_id
         self.stream = stream
         self.permission_resolver: Resolver = permission_resolver or auto_deny_resolver
-        self.executor = StreamingToolExecutor(state, self.permission_resolver)
+        self.task_graph = TaskGraph()
+        self.background = BackgroundExecutor(tasks=self.task_graph)
+        self.executor = StreamingToolExecutor(
+            state, self.permission_resolver,
+            engine=self, background=self.background, tasks=self.task_graph,
+        )
         self.messages: list[dict] = [{"role": "system", "content": fetch_system_prompt_parts(state)}]
         self._recent_calls: list[tuple[str, str]] = []
         self._plan_shown_this_turn = False
@@ -476,6 +494,15 @@ class QueryEngine:
 
         # main query() loop
         for _ in range(MAX_TOOL_ITERATIONS):
+            # Drain background notifications BEFORE the next API call so the
+            # model sees finished bash_async / agent_call_async results.
+            for note in self.background.drain_notifications():
+                inject = (
+                    f"[background] {note['kind']} {note['id']} "
+                    f"finished ({note['status']}): {note['label']}\n{note['result']}"
+                )
+                self.messages.append({"role": "user", "content": inject})
+                yield Message("warn", {"text": f"background {note['id']} {note['status']} — injected into context"})
             try:
                 msg, usage = self._chat_once(yield_deltas=self.stream)
                 if isinstance(msg, _StreamGen):

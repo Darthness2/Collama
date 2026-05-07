@@ -35,6 +35,9 @@ Slash commands:
   /tools-on               force native tool calls for this model (saves)
   /tools-off              force text-protocol tool fallback for this model (saves)
   /cd [path]              show or change the workspace directory
+  /tasks                  list persistent tasks (s07)
+  /jobs                   list background jobs (s08)
+  /wt                     show worktree stack (s12)
   /insecure on|off        toggle SSL verification for HTTPS calls (school/corp MITM proxies)
   /diag                   print model / workspace / home / tools / github status
   /model [name]           show or switch model
@@ -203,6 +206,28 @@ def repl(agent: Agent, cfg: dict) -> int:
                 agent.ctx.root = target
                 agent._refresh_system_prompt()
                 ui.info(f"workspace → {target}")
+                continue
+            if cmd == "tasks":
+                tasks = agent.engine.task_graph.list()
+                if not tasks:
+                    ui.info("(no tasks)")
+                else:
+                    for t in tasks[:50]:
+                        print(f"  {t.short()}")
+                continue
+            if cmd == "jobs":
+                jobs = agent.engine.background.list()
+                if not jobs:
+                    ui.info("(no background jobs)")
+                else:
+                    for j in jobs:
+                        first = j.result.splitlines()[0][:80] if j.result else ""
+                        print(f"  {j.id}  [{j.status:<7}] {j.kind:<6} {j.label[:40]}  {first}")
+                continue
+            if cmd == "wt":
+                stack = list(agent.state.worktree_stack or [])
+                ui.info(f"workspace: {agent.state.workspace}")
+                ui.info(f"worktree stack ({len(stack)}): " + (", ".join(stack) if stack else "(empty)"))
                 continue
             if cmd == "diag":
                 ui.info(f"model:    {agent.model}")

@@ -36,6 +36,9 @@ class AppState:
     # files we've read/edited this session (relative paths, in order)
     file_history: list[str] = field(default_factory=list)
 
+    # worktree stack — entered worktree dirs we'll pop back to.
+    worktree_stack: list[str] = field(default_factory=list)
+
     # per-model facts learned at runtime (e.g. tools_supported)
     models: dict[str, dict] = field(default_factory=dict)
 
