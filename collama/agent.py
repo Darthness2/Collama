@@ -1,271 +1,20 @@
-"""Main agent loop: send messages to Ollama, handle tool calls, repeat."""
+"""Thin compatibility wrapper around QueryEngine.
+
+The real loop now lives in `collama.engine.QueryEngine`. This shim keeps the
+old `Agent` API alive for any external caller (tests, scripts) and renders
+the QueryEngine event stream to the terminal — which is exactly what the
+REPL also does, just inlined here for backwards compatibility.
+"""
 from __future__ import annotations
 
-import json
-import re
 from pathlib import Path
-
-_TOOL_TAG_RX = re.compile(r"<tool>\s*(\{.*?\})\s*</tool>", re.DOTALL)
-_PLAN_RX = re.compile(r"<plan>(.*?)</plan>", re.DOTALL | re.IGNORECASE)
-_THINK_RX = re.compile(r"<think(?:ing)?>(.*?)</think(?:ing)?>", re.DOTALL | re.IGNORECASE)
-
-# Forgiving fallback: a fenced ```json ... ``` (or unlabeled fence) block
-# whose JSON has top-level "name" and "arguments" keys.
-_FENCE_RX = re.compile(r"```(?:json|JSON)?\s*\n?(.*?)\n?\s*```", re.DOTALL)
-
-
-def _looks_like_call(obj) -> tuple[str, dict] | None:
-    if not isinstance(obj, dict):
-        return None
-    name = obj.get("name") or obj.get("tool") or obj.get("function")
-    if not isinstance(name, str) or not name:
-        return None
-    args = obj.get("arguments")
-    if args is None:
-        args = obj.get("args") or obj.get("parameters") or {}
-    if not isinstance(args, dict):
-        return None
-    return name, args
-
-
-def _try_bare_json(text: str) -> tuple[str, dict, int, int] | None:
-    """Scan `text` for the first JSON object that has tool-call shape.
-
-    Tries every '{' position and uses raw_decode (handles nested braces).
-    Only returns a hit if the decoded object has a string `name` and a
-    dict `arguments` — keeps prose with stray braces from false-matching.
-    """
-    decoder = json.JSONDecoder()
-    for i, ch in enumerate(text):
-        if ch != "{":
-            continue
-        try:
-            obj, end = decoder.raw_decode(text[i:])
-        except (json.JSONDecodeError, ValueError):
-            continue
-        call = _looks_like_call(obj)
-        if not call:
-            continue
-        name, args = call
-        return name, args, i, i + end
-    return None
-
-
-def _extract_plan(text: str) -> tuple[list[str], str]:
-    """Pull a <plan> block out of text. Returns (steps, text_without_plan)."""
-    m = _PLAN_RX.search(text)
-    if not m:
-        return [], text
-    body = m.group(1).strip()
-    # Accept either "1. step" / "- step" / one-per-line.
-    steps: list[str] = []
-    for raw in body.splitlines():
-        s = raw.strip()
-        if not s:
-            continue
-        s = re.sub(r"^(?:[-*•]|\d+[.)])\s*", "", s)
-        if s:
-            steps.append(s)
-    cleaned = (text[:m.start()] + text[m.end():]).strip()
-    return steps, cleaned
-
-
-def _extract_thinking(text: str) -> tuple[list[str], str]:
-    blocks = []
-    def _consume(m):
-        blocks.append(m.group(1).strip())
-        return ""
-    cleaned = _THINK_RX.sub(_consume, text).strip()
-    return blocks, cleaned
-
-# DeepSeek-Coder native tool-call format (uses unicode-bar special tokens).
-# Example:
-#   <｜tool▁call▁begin｜>function<｜tool▁sep｜>write_file
-#   ```json
-#   {"path": "main.py", "content": "..."}
-#   ```
-#   <｜tool▁call▁end｜>
-# Outer bracket char: ｜ (U+FF5C) or plain |. Inner word-separator: ▁ (U+2581).
-_DS_BAR = r"[｜|]"
-_DEEPSEEK_CALL_RX = re.compile(
-    rf"<{_DS_BAR}tool▁call▁begin{_DS_BAR}>"
-    rf"\s*(?:function\s*<{_DS_BAR}tool▁sep{_DS_BAR}>\s*)?"
-    rf"([A-Za-z_][\w-]*)"
-    rf".*?```(?:json)?\s*(\{{.*?\}})\s*```"
-    rf".*?<{_DS_BAR}tool▁call▁end{_DS_BAR}>",
-    re.DOTALL,
-)
-
-# Hallucinated tool *outputs* — we never emit these; strip and reprimand.
-# Stripped in two passes: nuke wrapped <begin>...<end> blocks first (greedy
-# enough to span fake content), then any stray begin/end tokens that remain.
-_DEEPSEEK_OUTPUTS_BLOCK_RX = re.compile(
-    rf"<{_DS_BAR}tool▁outputs?▁begin{_DS_BAR}>.*?<{_DS_BAR}tool▁outputs?▁end{_DS_BAR}>",
-    re.DOTALL,
-)
-_DEEPSEEK_STRAY_TOKEN_RX = re.compile(
-    rf"<{_DS_BAR}tool▁outputs?▁(?:begin|end){_DS_BAR}>"
-)
-
-
-class _Outputs:
-    @staticmethod
-    def search(text: str) -> bool:
-        return bool(_DEEPSEEK_OUTPUTS_BLOCK_RX.search(text) or _DEEPSEEK_STRAY_TOKEN_RX.search(text))
-
-    @staticmethod
-    def strip(text: str) -> str:
-        text = _DEEPSEEK_OUTPUTS_BLOCK_RX.sub("", text)
-        text = _DEEPSEEK_STRAY_TOKEN_RX.sub("", text)
-        return text
-
-
-_DEEPSEEK_OUTPUTS_RX = _Outputs  # back-compat alias used elsewhere
-
-
-def _extract_tool_call(content: str):
-    """Return (name, args_dict, span_start, span_end) or None."""
-    m = _TOOL_TAG_RX.search(content)
-    if m:
-        try:
-            payload = json.loads(m.group(1))
-            name = payload["name"]
-            args = payload.get("arguments") or payload.get("args") or {}
-            if not isinstance(args, dict):
-                return None
-            return name, args, m.start(), m.end()
-        except (json.JSONDecodeError, KeyError, TypeError):
-            return None
-    m = _DEEPSEEK_CALL_RX.search(content)
-    if m:
-        try:
-            args = json.loads(m.group(2))
-            if not isinstance(args, dict):
-                return None
-            return m.group(1), args, m.start(), m.end()
-        except json.JSONDecodeError:
-            return None
-
-    # Fenced JSON tool call: ```json {"name":"...","arguments":{...}} ```
-    for m in _FENCE_RX.finditer(content):
-        try:
-            obj = json.loads(m.group(1))
-        except json.JSONDecodeError:
-            continue
-        call = _looks_like_call(obj)
-        if call:
-            name, args = call
-            return name, args, m.start(), m.end()
-
-    # Bare JSON tool call at the start of the content.
-    bare = _try_bare_json(content)
-    if bare:
-        return bare
-
-    return None
+from typing import Callable, Iterator, Optional
 
 from . import ui
-from .ollama_client import OllamaClient, OllamaError, ToolsUnsupportedError
-from .tools import ToolContext, all_tool_schemas, dispatch
-
-TEXT_TOOL_PROTOCOL = """
-=== TEXT TOOL PROTOCOL (use this — your runtime does NOT support native tool calls) ===
-You DO have full access to the user's filesystem and shell, but you must invoke tools by emitting a tag.
-
-To call a tool, emit EXACTLY one call and STOP. Any of these formats is accepted (Format A is preferred):
-
-  Format A (preferred — never confused with regular code):
-    <tool>{"name":"TOOL_NAME","arguments":{...}}</tool>
-
-  Format B (DeepSeek native):
-    <｜tool▁call▁begin｜>function<｜tool▁sep｜>TOOL_NAME
-    ```json
-    {...arguments...}
-    ```
-    <｜tool▁call▁end｜>
-
-  Format C (fenced JSON):
-    ```json
-    {"name": "TOOL_NAME", "arguments": {...}}
-    ```
-
-After the call, STOP. NEVER write a JSON tool-call as your final answer — if I see a JSON object with name/arguments, I will execute it. If you mean to give a final textual answer, write plain prose with NO JSON object and NO code fences containing a name/arguments shape. I — the harness — will run the tool and reply with the actual result. You then continue (call another tool, or write your final answer).
-When the task is complete, write your final answer as plain text with NO tool tag.
-
-PLAN FIRST: at the start of any non-trivial task, emit a numbered plan inside <plan>...</plan> (max ~6 steps). Then immediately call your first tool. The harness renders the plan in a panel for the user.
-
-OPTIONAL: wrap private reasoning in <think>...</think> — the harness will render it dimmed.
-
-CRITICAL — DO NOT FAKE TOOL OUTPUTS. Never produce <｜tool▁output▁…｜> or <｜tool▁outputs▁…｜> blocks; those are MINE to emit, not yours. If you write fake outputs, your changes did NOT actually happen and the user will see no files. Just emit the call tag and wait.
-
-Available tools (same names as native function calling):
-- read_file({"path": str, "start_line"?: int, "end_line"?: int})
-- write_file({"path": str, "content": str})
-- edit_file({"path": str, "old_string": str, "new_string": str, "replace_all"?: bool})
-- list_dir({"path"?: str})
-- grep({"pattern": str, "path"?: str, "case_insensitive"?: bool})
-- run_bash({"command": str, "timeout"?: int})
-- set_workspace({"path": str, "create"?: bool})
-- gh_whoami({}), gh_list_repos({...}), gh_get_repo({"repo": str}),
-  gh_get_file({"repo": str, "path": str, "ref"?: str}),
-  gh_list_issues({"repo": str, ...}), gh_create_issue({"repo": str, "title": str, "body"?: str}),
-  gh_list_pulls({"repo": str, ...}), gh_get_pull({"repo": str, "number": int}),
-  gh_search_code({"query": str}), github_api({"method"?: str, "path": str, "body"?: object})
-
-IMPORTANT: You CAN see the user's files. Use read_file / list_dir / grep instead of saying you cannot.
-"""
-
-
-def build_system_prompt(workspace: Path, home: Path, tools_enabled: bool = True) -> str:
-    base = f"""You are Collama, a terminal-based coding assistant running on the user's machine via Ollama.
-
-You help the user read, edit, and create files, run commands, query GitHub, and answer questions about their codebase.
-
-Environment:
-- Workspace (cwd): {workspace}
-- User home dir:  {home}
-- OS user can reach files anywhere on the filesystem.
-
-Filesystem access:
-- Your file/dir/grep/bash tools accept relative paths (resolved against the workspace), absolute paths (e.g. /etc/hosts), and ~-paths (e.g. ~/Documents). The home dir above is what ~ expands to.
-- You can — and should — read and edit files OUTSIDE the workspace when the user asks. The workspace is just the default for relative paths; it is NOT a sandbox.
-- IMPORTANT — local first, GitHub second: when the user mentions a project, repo, or directory name (e.g. "use meteteoman/Market", "in my snake project"), it is almost certainly a LOCAL clone or directory on this machine, NOT a remote GitHub repo. ALWAYS check locally first with list_dir on {home}/<name>, list_dir on the workspace, and grep across the home dir. Only call gh_* tools when the user explicitly says "on GitHub" or asks you to create/list/comment on issues, PRs, or remote repos.
-- After list_dir on a directory OUTSIDE the current workspace, you MUST do ONE of these before reading files inside it:
-    a) call set_workspace with that directory (preferred — relative paths now resolve there), OR
-    b) use absolute paths for every read_file / edit_file / grep call (e.g. read_file path="/Users/me/Market/main.py").
-  Do NOT use relative paths like "main.py" or "src/x.py" after listing a different directory; they will resolve against the OLD workspace and 404. If a read_file errors with "not found", that is the cause — switch the workspace or use an absolute path.
-- When the user starts a NEW project, follow this recipe EXACTLY:
-    1. Pick a project dir under the home dir, e.g. {home}/<project-name>/
-    2. Call set_workspace with that path and create=true.
-    3. From that point on, all relative file paths land inside the project. write_file("main.py", ...) now writes to {home}/<project-name>/main.py — NOT to {workspace}/main.py.
-  Do NOT keep using the previous workspace for the new project. Do NOT write files using paths like "src/main.py" without first calling set_workspace, or your files will land in the wrong directory.
-- Be careful with destructive operations. Always confirm intent before deleting or overwriting outside the workspace.
-
-Operating principles:
-- Plan first. For ANY non-trivial task (more than a single tool call), open your reply with a numbered plan in this exact format:
-
-    <plan>
-    1. first step
-    2. second step
-    3. third step
-    </plan>
-
-  Keep steps short (one line each, max ~6 steps). After the plan, immediately start executing — call the first tool. The harness renders the plan in a panel so the user sees what's coming.
-- Skip the plan only for trivial single-tool questions (e.g. "list this dir").
-- Be concise. The user is in a terminal; long answers are noise.
-- Don't ask the user to paste file contents — read files yourself with read_file.
-- Don't guess at code — verify with grep / read_file first.
-- Prefer edit_file over write_file for existing files (safer — exact replacement, and the user sees a diff).
-- When making changes, briefly confirm what you did and any follow-ups the user should run (tests, lints).
-- One step at a time: call a tool, see the result, then decide.
-- When the task is complete, give a short final answer and stop calling tools.
-- If you want to think out loud privately, wrap it in <think>...</think>; the harness will render it dimmed.
-"""
-    if not tools_enabled:
-        base += "\n" + TEXT_TOOL_PROTOCOL
-    return base
-
-MAX_TOOL_ITERATIONS = 25
+from .engine import Message, QueryEngine
+from .ollama_client import OllamaClient
+from .state import AppState
+from .tools import ToolContext  # re-exported so existing imports keep working
 
 
 class Agent:
@@ -276,262 +25,108 @@ class Agent:
         root: Path,
         yolo: bool = False,
         temperature: float = 0.2,
-        on_turn_complete=None,
+        on_turn_complete: Optional[Callable] = None,
         tools_enabled: bool = True,
-        on_tools_disabled=None,
-    ):
+        on_tools_disabled: Optional[Callable] = None,
+        config: Optional[dict] = None,
+    ) -> None:
+        self.state = AppState(
+            workspace=root,
+            home=Path.home(),
+            yolo=yolo,
+            tools_enabled=tools_enabled,
+        )
+        self.engine = QueryEngine(
+            client=client,
+            state=self.state,
+            model=model,
+            temperature=temperature,
+            config=config,
+        )
         self.client = client
-        self.model = model
-        self.ctx = ToolContext(root=root, yolo=yolo)
-        self.temperature = temperature
-        self.tools_enabled = tools_enabled
-        self.on_turn_complete = on_turn_complete  # called after each user turn
-        self.on_tools_disabled = on_tools_disabled  # called the first time tool support fails
-        self.messages: list[dict] = [{"role": "system", "content": self._system_prompt()}]
+        self.on_turn_complete = on_turn_complete
+        self.on_tools_disabled = on_tools_disabled
 
-    def _system_prompt(self) -> str:
-        return build_system_prompt(self.ctx.root, Path.home(), tools_enabled=self.tools_enabled)
+        if on_tools_disabled is not None:
+            def _watch(state, key, val):
+                if key == "tools_enabled" and val is False:
+                    try:
+                        on_tools_disabled(self)
+                    except Exception:
+                        pass
+            self.state.subscribe(_watch)
 
-    def _refresh_system_prompt(self) -> None:
-        if self.messages and self.messages[0].get("role") == "system":
-            self.messages[0]["content"] = self._system_prompt()
-        else:
-            self.messages.insert(0, {"role": "system", "content": self._system_prompt()})
+    # --- legacy-shaped properties ---
+    @property
+    def model(self) -> str:
+        return self.engine.model
 
+    @model.setter
+    def model(self, value: str) -> None:
+        self.engine.model = value
+
+    @property
+    def messages(self) -> list[dict]:
+        return self.engine.messages
+
+    @property
+    def tools_enabled(self) -> bool:
+        return self.state.tools_enabled
+
+    @tools_enabled.setter
+    def tools_enabled(self, value: bool) -> None:
+        self.state.update(tools_enabled=value)
+        self.engine.refresh_system_prompt()
+
+    @property
+    def ctx(self) -> ToolContext:
+        # Build on demand so external mutation lands in state.
+        return ToolContext(**self.state.to_tool_ctx_kwargs())
+
+    # --- legacy methods ---
     def reset(self) -> None:
-        self.messages = [{"role": "system", "content": self._system_prompt()}]
+        self.engine.reset()
 
     def load_messages(self, messages: list[dict]) -> None:
-        if not messages or messages[0].get("role") != "system":
-            messages = [{"role": "system", "content": self._system_prompt()}] + list(messages)
-        self.messages = list(messages)
+        self.engine.load_messages(messages)
 
-    def _options(self) -> dict:
-        return {"temperature": self.temperature}
-
-    def _summarize_args(self, name: str, args: dict) -> str:
-        if name in ("read_file", "write_file", "edit_file"):
-            return str(args.get("path", ""))
-        if name == "list_dir":
-            return str(args.get("path", "."))
-        if name == "grep":
-            return f"/{args.get('pattern', '')}/  in {args.get('path', '.')}"
-        if name == "run_bash":
-            cmd = str(args.get("command", ""))
-            return cmd if len(cmd) < 80 else cmd[:77] + "…"
-        if name.startswith("gh_") or name == "github_api":
-            bits = []
-            for k in ("repo", "path", "number", "query", "method"):
-                if k in args:
-                    bits.append(f"{k}={args[k]}")
-            return " ".join(bits)
-        return ""
-
-    def _finish(self, content: str) -> str:
+    def turn(self, user_input: str) -> str:
+        """Run a turn, rendering events to the terminal as they stream."""
+        final = ""
+        for msg in self.engine.submit_message(user_input):
+            final = render_event(msg, final)
         if self.on_turn_complete:
             try:
                 self.on_turn_complete(self)
             except Exception:
                 pass
-        return content
+        return final
 
-    def _render_meta(self, content: str) -> str:
-        """Pull plan/thinking blocks out, render them, return remaining text.
+    def stream(self, user_input: str) -> Iterator[Message]:
+        """Direct access to the event stream (skip terminal rendering)."""
+        return self.engine.submit_message(user_input)
 
-        Plan/think tags are ALWAYS stripped (so downstream tool-call parsing
-        sees clean text); plan rendering only happens once per turn.
-        """
-        thinks, content = _extract_thinking(content)
-        for t in thinks:
-            if t:
-                ui.thinking(t)
-        steps, content = _extract_plan(content)
-        if steps and not getattr(self, "_plan_shown_this_turn", False):
-            ui.plan(steps)
-            self._plan_shown_this_turn = True
-        return content
 
-    def _extract_calls(self, msg: dict, content: str) -> tuple[list[tuple[str, dict, str]], str]:
-        """Return (calls, narration). Each call is (name, args, result_role).
-
-        result_role is "tool" for native tool_calls (replied to via role=tool)
-        or "user" for salvaged calls (replied to via role=user).
-
-        Native tool_calls take precedence; if none, we scan `content` for any
-        <tool>/DeepSeek/fenced/bare JSON tool call. `narration` is the content
-        with any salvaged-call substring removed (so it won't be re-rendered).
-        """
-        native = msg.get("tool_calls") or []
-        if native:
-            calls: list[tuple[str, dict, str]] = []
-            for c in native:
-                fn = c.get("function", {}) or {}
-                name = fn.get("name", "")
-                raw = fn.get("arguments", {})
-                if isinstance(raw, str):
-                    try:
-                        args = json.loads(raw) if raw else {}
-                    except json.JSONDecodeError:
-                        args = {}
-                else:
-                    args = raw or {}
-                calls.append((name, args, "tool"))
-            return calls, content
-
-        if not content:
-            return [], content
-
-        extracted = _extract_tool_call(content)
-        if not extracted:
-            return [], content
-        name, args, start, end = extracted
-        narration = (content[:start] + content[end:]).strip()
-        return [(name, args, "user")], narration
-
-    def _chat_once(self) -> dict | None:
-        """One round-trip to Ollama. Handles tool-unsupported fallback transparently."""
-        try:
-            with ui.Spinner("thinking"):
-                return self.client.chat(
-                    model=self.model,
-                    messages=self.messages,
-                    tools=all_tool_schemas() if self.tools_enabled else None,
-                    options=self._options(),
-                )
-        except ToolsUnsupportedError:
-            ui.warn(
-                f"model '{self.model}' does not support native tool calls — "
-                "switching to text-protocol tools for this session."
-            )
-            self.tools_enabled = False
-            self._refresh_system_prompt()
-            if self.on_tools_disabled:
-                try:
-                    self.on_tools_disabled(self)
-                except Exception:
-                    pass
-            try:
-                with ui.Spinner("thinking"):
-                    return self.client.chat(
-                        model=self.model,
-                        messages=self.messages,
-                        tools=None,
-                        options=self._options(),
-                    )
-            except OllamaError as e:
-                ui.error(str(e))
-                return None
-        except OllamaError as e:
-            ui.error(str(e))
-            return None
-
-    def turn(self, user_input: str) -> str:
-        """Core agent loop:
-
-            user → messages → Ollama → response
-                                          │
-                              tool calls present?
-                              ┌──────────┴──────────┐
-                             yes                    no
-                              │                     │
-                       execute tools           render text
-                       append results          and return
-                       loop ────────────► messages
-        """
-        self.messages.append({"role": "user", "content": user_input})
-        self._plan_shown_this_turn = False
-        self._recent_calls = []
-
-        for _ in range(MAX_TOOL_ITERATIONS):
-            msg = self._chat_once()
-            if msg is None:
-                return ""
-
-            # Strip fabricated <｜tool▁outputs｜> blocks before storing.
-            raw = msg.get("content") or ""
-            had_fakes = _Outputs.search(raw)
-            cleaned = _Outputs.strip(raw).strip()
-            msg["content"] = cleaned
-            self.messages.append(msg)
-
-            if had_fakes:
-                ui.warn("model fabricated tool outputs — asking it to retry properly.")
-                self.messages.append({
-                    "role": "user",
-                    "content": (
-                        "STOP. You fabricated tool output blocks; only I emit those. "
-                        "Emit a single tool call (<tool>{...}</tool> or fenced JSON) and STOP. "
-                        "Do NOT write tool_outputs yourself."
-                    ),
-                })
-                continue
-
-            # Pull plan/<think> tags out for separate rendering.
-            content = self._render_meta(cleaned).strip()
-
-            # Determine the next action: tool calls, or final text.
-            calls, narration = self._extract_calls(msg, content)
-
-            if not calls:
-                if narration:
-                    ui.assistant(narration)
-                return self._finish(narration)
-
-            if narration:
-                # Inline narration before tool execution.
-                print(ui.color("  ▪ ", ui.TEAL_DIM) + ui.color(narration, ui.MUTED))
-
-            for name, args, role in calls:
-                if self._check_loop(name, args):
-                    continue
-                ui.tool_call(name, self._summarize_args(name, args))
-                result = dispatch(name, args, self.ctx)
-                ok = not result.startswith("ERROR")
-                first_line = result.splitlines()[0] if result else ""
-                ui.tool_result(first_line[:160], ok=ok)
-
-                if role == "tool":
-                    self.messages.append({"role": "tool", "name": name, "content": result})
-                else:
-                    self.messages.append({
-                        "role": "user",
-                        "content": f"Tool result for {name}:\n{result}",
-                    })
-
-        ui.warn(f"hit tool-call limit ({MAX_TOOL_ITERATIONS}); stopping.")
-        return ""
-
-    LOOP_THRESHOLD = 3
-
-    def _check_loop(self, name: str, args: dict) -> bool:
-        """Return True if the same (tool, args) just ran LOOP_THRESHOLD times.
-
-        On detection, append a steer message so the model rethinks.
-        """
-        key = (name, json.dumps(args, sort_keys=True, default=str))
-        history = getattr(self, "_recent_calls", [])
-        history.append(key)
-        # only count consecutive matches at the tail
-        run = 1
-        for prev in reversed(history[:-1]):
-            if prev == key:
-                run += 1
-            else:
-                break
-        self._recent_calls = history[-12:]
-        if run >= self.LOOP_THRESHOLD:
-            ui.warn(f"loop detected: {name} called {run}× with the same arguments — steering.")
-            self.messages.append({
-                "role": "user",
-                "content": (
-                    f"You have called {name} with the same arguments {run} times in a row "
-                    f"and gotten the same result. Stop repeating. Try a different approach: "
-                    f"a different path, different search pattern, list_dir the parent, call "
-                    f"set_workspace, or just summarize what you found and ask me a clarifying "
-                    f"question. Do NOT call {name} with those same arguments again."
-                ),
-            })
-            self._recent_calls = []
-            return True
-        return False
-
+def render_event(event: Message, final_text: str) -> str:
+    """Render a single QueryEngine event to the terminal. Returns updated final text."""
+    k, d = event.kind, event.data
+    if k == "thinking":
+        ui.thinking(d["text"])
+    elif k == "plan":
+        ui.plan(d["steps"])
+    elif k == "narration":
+        print(ui.color("  ▪ ", ui.TEAL_DIM) + ui.color(d["text"], ui.MUTED))
+    elif k == "assistant":
+        ui.assistant(d["text"])
+        final_text = d["text"]
+    elif k == "tool_call":
+        ui.tool_call(d["name"], d["summary"])
+    elif k == "tool_result":
+        ui.tool_result(d["first_line"][:160], ok=d["ok"])
+    elif k == "warn":
+        ui.warn(d["text"])
+    elif k == "error":
+        ui.error(d["text"])
+    elif k == "compact":
+        ui.info(f"context auto-compacted: {d['before']} → {d['after']} approx tokens")
+    return final_text
