@@ -9,6 +9,7 @@ from pathlib import Path
 from . import __version__, config, sessions, ui
 from .agent import Agent
 from .ollama_client import OllamaClient, OllamaError
+from .prompt import Prompt
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -141,9 +142,10 @@ def repl(agent: Agent, cfg: dict) -> int:
     agent.on_turn_complete = lambda a: _autosave(session, a)
     ui.info(f"new session: {session['id']}")
 
+    prompt = Prompt()
     while True:
         try:
-            line = input(ui.color("\n› ", ui.BOLD)).strip()
+            line = prompt.ask(ui.color("\n› ", ui.BOLD)).strip()
         except (EOFError, KeyboardInterrupt):
             print()
             return 0

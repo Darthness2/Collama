@@ -1,0 +1,108 @@
+"""Input prompt with slash-command auto-completion.
+
+Uses prompt_toolkit if available — gives a real popup as you type `/`.
+Falls back to readline tab-completion, then plain input().
+"""
+from __future__ import annotations
+
+from typing import Callable
+
+# (name, hint) pairs shown in the popup.
+SLASH_COMMANDS: list[tuple[str, str]] = [
+    ("/help", "show available commands"),
+    ("/tools", "list tools the model can call"),
+    ("/model", "show or switch model (saved)"),
+    ("/models", "list installed Ollama models"),
+    ("/host", "show or change Ollama host (saved)"),
+    ("/config", "show current config (token redacted)"),
+    ("/set", "set a config value: /set <key> <value>"),
+    ("/login", "/login github <token>"),
+    ("/logout", "/logout github"),
+    ("/whoami", "show authenticated GitHub user"),
+    ("/clear", "reset conversation history"),
+    ("/new", "start a new conversation"),
+    ("/resume", "list/resume saved conversations"),
+    ("/sessions", "list saved conversations"),
+    ("/save", "force-save / set title of current conversation"),
+    ("/delete", "delete a saved conversation"),
+    ("/yolo", "toggle auto-approve for tool calls"),
+    ("/exit", "leave Collama"),
+    ("/quit", "leave Collama"),
+]
+
+
+def _build_pt_session():
+    """Try to build a prompt_toolkit PromptSession with a slash completer."""
+    try:
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.completion import Completer, Completion
+        from prompt_toolkit.history import FileHistory
+        from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+    except ImportError:
+        return None
+
+    from .config import config_dir
+
+    class SlashCompleter(Completer):
+        def get_completions(self, document, complete_event):
+            text = document.text_before_cursor
+            # Only complete when the line starts with '/'
+            if not text.startswith("/"):
+                return
+            # Don't keep showing the popup once the user has moved past the command word.
+            if " " in text:
+                return
+            for name, hint in SLASH_COMMANDS:
+                if name.startswith(text):
+                    yield Completion(
+                        name,
+                        start_position=-len(text),
+                        display=name,
+                        display_meta=hint,
+                    )
+
+    history_path = config_dir() / "history"
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+
+    return PromptSession(
+        completer=SlashCompleter(),
+        complete_while_typing=True,
+        auto_suggest=AutoSuggestFromHistory(),
+        history=FileHistory(str(history_path)),
+    )
+
+
+def _install_readline_fallback() -> bool:
+    try:
+        import readline
+    except ImportError:
+        return False
+
+    names = [c[0] for c in SLASH_COMMANDS]
+
+    def completer(text, state):
+        if not text.startswith("/"):
+            return None
+        matches = [n for n in names if n.startswith(text)]
+        return matches[state] if state < len(matches) else None
+
+    readline.set_completer(completer)
+    readline.parse_and_bind("tab: complete")
+    # Don't break command words on '/'.
+    readline.set_completer_delims(" \t\n")
+    return True
+
+
+class Prompt:
+    def __init__(self) -> None:
+        self._pt = _build_pt_session()
+        if self._pt is None:
+            self._readline = _install_readline_fallback()
+        else:
+            self._readline = False
+
+    def ask(self, prompt: str) -> str:
+        if self._pt is not None:
+            return self._pt.prompt(prompt)
+        # plain input(); readline (if installed) decorates it with TAB-completion
+        return input(prompt)

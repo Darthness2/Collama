@@ -58,6 +58,11 @@ You can wipe the saved config and start fresh with:
 collama --reset-config
 ```
 
+As soon as you type `/` in the prompt, a popup of available slash commands
+appears with short descriptions; arrow keys + Enter pick one. (Requires
+`prompt_toolkit`, which is installed as a dependency. Without it Collama
+falls back to TAB-completion via `readline`.)
+
 ## Slash commands inside the REPL
 
 ```
