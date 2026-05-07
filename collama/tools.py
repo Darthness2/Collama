@@ -192,10 +192,11 @@ def t_run_bash(args: dict, ctx: ToolContext) -> str:
     if not ctx.confirm("shell command", cmd):
         return "ERROR: user denied command"
     try:
-        proc = subprocess.run(
-            cmd, shell=True, cwd=str(ctx.root),
-            capture_output=True, text=True, timeout=timeout,
-        )
+        with ui.Spinner(f"running: {cmd[:40] + ('…' if len(cmd) > 40 else '')}"):
+            proc = subprocess.run(
+                cmd, shell=True, cwd=str(ctx.root),
+                capture_output=True, text=True, timeout=timeout,
+            )
     except subprocess.TimeoutExpired:
         return f"ERROR: timed out after {timeout}s"
     out = proc.stdout

@@ -284,12 +284,13 @@ class Agent:
         """Loop using the <tool>{json}</tool> text protocol — for models without native tool calls."""
         for _ in range(MAX_TOOL_ITERATIONS):
             try:
-                msg = self.client.chat(
-                    model=self.model,
-                    messages=self.messages,
-                    tools=None,
-                    options=self._options(),
-                )
+                with ui.Spinner("thinking"):
+                    msg = self.client.chat(
+                        model=self.model,
+                        messages=self.messages,
+                        tools=None,
+                        options=self._options(),
+                    )
             except OllamaError as e:
                 ui.error(str(e))
                 return ""
@@ -357,12 +358,13 @@ class Agent:
 
         for _ in range(MAX_TOOL_ITERATIONS):
             try:
-                msg = self.client.chat(
-                    model=self.model,
-                    messages=self.messages,
-                    tools=all_tool_schemas() if self.tools_enabled else None,
-                    options=self._options(),
-                )
+                with ui.Spinner("thinking"):
+                    msg = self.client.chat(
+                        model=self.model,
+                        messages=self.messages,
+                        tools=all_tool_schemas() if self.tools_enabled else None,
+                        options=self._options(),
+                    )
             except ToolsUnsupportedError:
                 ui.warn(
                     f"model '{self.model}' does not support native tool calls — "

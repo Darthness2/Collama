@@ -5,6 +5,8 @@ import os
 import shutil
 import sys
 import textwrap
+import threading
+import time
 
 # ANSI base
 RESET = "\033[0m"
@@ -134,6 +136,74 @@ def panel(body: str | list[str], title: str = "", style: str = "round",
 
 def hr(char: str = "─", c: str = TEAL_DIM) -> None:
     print(color(char * width(), c))
+
+
+# ---------- spinner ----------
+
+_SPIN_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
+class Spinner:
+    """Tiny non-blocking status spinner. Use as a context manager.
+
+    Renders as:    ⠋ thinking…   (0.4s)
+    On stop, clears the line so the next print is clean.
+    """
+
+    def __init__(self, label: str = "thinking", color_c: str = TEAL_BRIGHT) -> None:
+        self.label = label
+        self.color_c = color_c
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._t0 = 0.0
+
+    def set_label(self, label: str) -> None:
+        self.label = label
+
+    def start(self) -> None:
+        if not sys.stdout.isatty() or self._thread is not None:
+            return
+        self._stop.clear()
+        self._t0 = time.monotonic()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        if self._thread is None:
+            return
+        self._stop.set()
+        self._thread.join()
+        self._thread = None
+        # Clear the spinner line.
+        sys.stdout.write("\r\033[2K")
+        sys.stdout.flush()
+
+    def _run(self) -> None:
+        i = 0
+        while not self._stop.is_set():
+            frame = _SPIN_FRAMES[i % len(_SPIN_FRAMES)]
+            elapsed = time.monotonic() - self._t0
+            timer = f"({elapsed:0.1f}s)"
+            line = (
+                "  "
+                + color(frame, self.color_c)
+                + " "
+                + color(self.label + "…", MUTED)
+                + "  "
+                + color(timer, SOFT)
+            )
+            sys.stdout.write("\r\033[2K" + line)
+            sys.stdout.flush()
+            i += 1
+            # Wait in small increments so .stop() reacts quickly.
+            self._stop.wait(0.08)
+
+    def __enter__(self) -> "Spinner":
+        self.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.stop()
 
 
 # ---------- log helpers ----------
