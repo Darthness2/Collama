@@ -123,7 +123,7 @@ def t_edit_file(args: dict, ctx: ToolContext) -> str:
 
 def t_list_dir(args: dict, ctx: ToolContext) -> str:
     path = args.get("path", ".")
-    p = _resolve(path, ctx.root)
+    p = _resolve(path, ctx.root).resolve()
     if not p.exists():
         return f"ERROR: not found: {path}"
     if not p.is_dir():
@@ -138,7 +138,20 @@ def t_list_dir(args: dict, ctx: ToolContext) -> str:
         except OSError:
             size = 0
         rows.append(f"  {kind}  {size:>9}  {entry.name}")
-    return _truncate(f"{path}\n" + "\n".join(rows) if rows else f"{path} (empty)")
+    header = f"{path}  ({len(rows)} entries)"
+    body = "\n".join(rows) if rows else "(empty or only dotfiles)"
+    hint = ""
+    try:
+        outside = (p != ctx.root) and (ctx.root not in p.parents) and (p not in ctx.root.parents)
+    except Exception:
+        outside = False
+    if outside:
+        hint = (
+            f"\n\nNOTE: this directory ({p}) is OUTSIDE the current workspace ({ctx.root}). "
+            f"To read or edit files inside it with relative paths, first call "
+            f"set_workspace with path={p}. Otherwise use absolute paths like {p}/<file>."
+        )
+    return _truncate(f"{header}\n{body}{hint}")
 
 
 def t_grep(args: dict, ctx: ToolContext) -> str:

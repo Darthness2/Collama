@@ -229,6 +229,10 @@ Filesystem access:
 - Your file/dir/grep/bash tools accept relative paths (resolved against the workspace), absolute paths (e.g. /etc/hosts), and ~-paths (e.g. ~/Documents). The home dir above is what ~ expands to.
 - You can — and should — read and edit files OUTSIDE the workspace when the user asks. The workspace is just the default for relative paths; it is NOT a sandbox.
 - IMPORTANT — local first, GitHub second: when the user mentions a project, repo, or directory name (e.g. "use meteteoman/Market", "in my snake project"), it is almost certainly a LOCAL clone or directory on this machine, NOT a remote GitHub repo. ALWAYS check locally first with list_dir on {home}/<name>, list_dir on the workspace, and grep across the home dir. Only call gh_* tools when the user explicitly says "on GitHub" or asks you to create/list/comment on issues, PRs, or remote repos.
+- After list_dir on a directory OUTSIDE the current workspace, you MUST do ONE of these before reading files inside it:
+    a) call set_workspace with that directory (preferred — relative paths now resolve there), OR
+    b) use absolute paths for every read_file / edit_file / grep call (e.g. read_file path="/Users/me/Market/main.py").
+  Do NOT use relative paths like "main.py" or "src/x.py" after listing a different directory; they will resolve against the OLD workspace and 404. If a read_file errors with "not found", that is the cause — switch the workspace or use an absolute path.
 - When the user starts a NEW project, follow this recipe EXACTLY:
     1. Pick a project dir under the home dir, e.g. {home}/<project-name>/
     2. Call set_workspace with that path and create=true.
@@ -400,6 +404,8 @@ class Agent:
             if preamble:
                 ui.assistant(preamble)
 
+            if self._check_loop(name, args):
+                continue
             ui.tool_call(name, self._summarize_args(name, args))
             result = dispatch(name, args, self.ctx)
             ok = not result.startswith("ERROR")
@@ -414,10 +420,45 @@ class Agent:
         ui.warn(f"hit tool-call limit ({MAX_TOOL_ITERATIONS}); stopping.")
         return ""
 
+    LOOP_THRESHOLD = 3
+
+    def _check_loop(self, name: str, args: dict) -> bool:
+        """Return True if the same (tool, args) just ran LOOP_THRESHOLD times.
+
+        On detection, append a steer message so the model rethinks.
+        """
+        key = (name, json.dumps(args, sort_keys=True, default=str))
+        history = getattr(self, "_recent_calls", [])
+        history.append(key)
+        # only count consecutive matches at the tail
+        run = 1
+        for prev in reversed(history[:-1]):
+            if prev == key:
+                run += 1
+            else:
+                break
+        self._recent_calls = history[-12:]
+        if run >= self.LOOP_THRESHOLD:
+            ui.warn(f"loop detected: {name} called {run}× with the same arguments — steering.")
+            self.messages.append({
+                "role": "user",
+                "content": (
+                    f"You have called {name} with the same arguments {run} times in a row "
+                    f"and gotten the same result. Stop repeating. Try a different approach: "
+                    f"a different path, different search pattern, list_dir the parent, call "
+                    f"set_workspace, or just summarize what you found and ask me a clarifying "
+                    f"question. Do NOT call {name} with those same arguments again."
+                ),
+            })
+            self._recent_calls = []
+            return True
+        return False
+
     def turn(self, user_input: str) -> str:
         """Run one user-turn: send message, loop through tool calls, return final text."""
         self.messages.append({"role": "user", "content": user_input})
         self._plan_shown_this_turn = False
+        self._recent_calls = []
 
         if not self.tools_enabled:
             return self._run_text_protocol()
@@ -464,6 +505,8 @@ class Agent:
                     preamble = content[:start].strip()
                     if preamble:
                         print(ui.color("  ▪ ", ui.TEAL_DIM) + ui.color(preamble, ui.MUTED))
+                    if self._check_loop(name, args):
+                        continue
                     ui.tool_call(name, self._summarize_args(name, args))
                     result = dispatch(name, args, self.ctx)
                     ok = not result.startswith("ERROR")
@@ -500,6 +543,8 @@ class Agent:
                 else:
                     args = raw_args or {}
 
+                if self._check_loop(name, args):
+                    continue
                 ui.tool_call(name, self._summarize_args(name, args))
                 result = dispatch(name, args, self.ctx)
                 ok = not result.startswith("ERROR")
