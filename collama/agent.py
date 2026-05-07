@@ -9,6 +9,46 @@ _TOOL_TAG_RX = re.compile(r"<tool>\s*(\{.*?\})\s*</tool>", re.DOTALL)
 _PLAN_RX = re.compile(r"<plan>(.*?)</plan>", re.DOTALL | re.IGNORECASE)
 _THINK_RX = re.compile(r"<think(?:ing)?>(.*?)</think(?:ing)?>", re.DOTALL | re.IGNORECASE)
 
+# Forgiving fallback: a fenced ```json ... ``` (or unlabeled fence) block
+# whose JSON has top-level "name" and "arguments" keys.
+_FENCE_RX = re.compile(r"```(?:json|JSON)?\s*\n?(.*?)\n?\s*```", re.DOTALL)
+
+
+def _looks_like_call(obj) -> tuple[str, dict] | None:
+    if not isinstance(obj, dict):
+        return None
+    name = obj.get("name") or obj.get("tool") or obj.get("function")
+    if not isinstance(name, str) or not name:
+        return None
+    args = obj.get("arguments")
+    if args is None:
+        args = obj.get("args") or obj.get("parameters") or {}
+    if not isinstance(args, dict):
+        return None
+    return name, args
+
+
+def _try_bare_json(text: str) -> tuple[str, dict, int, int] | None:
+    """Try to decode a JSON object that begins somewhere in `text`.
+
+    Uses raw_decode to handle nested braces correctly. Only accepts the
+    decoded object if it has the shape of a tool call.
+    """
+    s = text.strip()
+    if not s.startswith("{"):
+        return None
+    start = text.index("{")
+    decoder = json.JSONDecoder()
+    try:
+        obj, end = decoder.raw_decode(text[start:])
+    except (json.JSONDecodeError, ValueError):
+        return None
+    call = _looks_like_call(obj)
+    if not call:
+        return None
+    name, args = call
+    return name, args, start, start + end
+
 
 def _extract_plan(text: str) -> tuple[list[str], str]:
     """Pull a <plan> block out of text. Returns (steps, text_without_plan)."""
@@ -104,6 +144,23 @@ def _extract_tool_call(content: str):
             return m.group(1), args, m.start(), m.end()
         except json.JSONDecodeError:
             return None
+
+    # Fenced JSON tool call: ```json {"name":"...","arguments":{...}} ```
+    for m in _FENCE_RX.finditer(content):
+        try:
+            obj = json.loads(m.group(1))
+        except json.JSONDecodeError:
+            continue
+        call = _looks_like_call(obj)
+        if call:
+            name, args = call
+            return name, args, m.start(), m.end()
+
+    # Bare JSON tool call at the start of the content.
+    bare = _try_bare_json(content)
+    if bare:
+        return bare
+
     return None
 
 from . import ui
@@ -114,19 +171,24 @@ TEXT_TOOL_PROTOCOL = """
 === TEXT TOOL PROTOCOL (use this — your runtime does NOT support native tool calls) ===
 You DO have full access to the user's filesystem and shell, but you must invoke tools by emitting a tag.
 
-To call a tool, emit EXACTLY one tag and STOP. Use either of these formats:
+To call a tool, emit EXACTLY one call and STOP. Any of these formats is accepted (Format A is preferred):
 
-  Format A (preferred):
+  Format A (preferred — never confused with regular code):
     <tool>{"name":"TOOL_NAME","arguments":{...}}</tool>
 
-  Format B (DeepSeek native, also accepted):
+  Format B (DeepSeek native):
     <｜tool▁call▁begin｜>function<｜tool▁sep｜>TOOL_NAME
     ```json
     {...arguments...}
     ```
     <｜tool▁call▁end｜>
 
-After the tag, STOP. I — the harness — will run the tool and reply with the actual result. You then continue (call another tool, or write your final answer).
+  Format C (fenced JSON):
+    ```json
+    {"name": "TOOL_NAME", "arguments": {...}}
+    ```
+
+After the call, STOP. NEVER write a JSON tool-call as your final answer — if I see a JSON object with name/arguments, I will execute it. If you mean to give a final textual answer, write plain prose with NO JSON object and NO code fences containing a name/arguments shape. I — the harness — will run the tool and reply with the actual result. You then continue (call another tool, or write your final answer).
 When the task is complete, write your final answer as plain text with NO tool tag.
 
 PLAN FIRST: at the start of any non-trivial task, emit a numbered plan inside <plan>...</plan> (max ~6 steps). Then immediately call your first tool. The harness renders the plan in a panel for the user.
