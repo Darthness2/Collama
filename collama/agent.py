@@ -29,25 +29,26 @@ def _looks_like_call(obj) -> tuple[str, dict] | None:
 
 
 def _try_bare_json(text: str) -> tuple[str, dict, int, int] | None:
-    """Try to decode a JSON object that begins somewhere in `text`.
+    """Scan `text` for the first JSON object that has tool-call shape.
 
-    Uses raw_decode to handle nested braces correctly. Only accepts the
-    decoded object if it has the shape of a tool call.
+    Tries every '{' position and uses raw_decode (handles nested braces).
+    Only returns a hit if the decoded object has a string `name` and a
+    dict `arguments` — keeps prose with stray braces from false-matching.
     """
-    s = text.strip()
-    if not s.startswith("{"):
-        return None
-    start = text.index("{")
     decoder = json.JSONDecoder()
-    try:
-        obj, end = decoder.raw_decode(text[start:])
-    except (json.JSONDecodeError, ValueError):
-        return None
-    call = _looks_like_call(obj)
-    if not call:
-        return None
-    name, args = call
-    return name, args, start, start + end
+    for i, ch in enumerate(text):
+        if ch != "{":
+            continue
+        try:
+            obj, end = decoder.raw_decode(text[i:])
+        except (json.JSONDecodeError, ValueError):
+            continue
+        call = _looks_like_call(obj)
+        if not call:
+            continue
+        name, args = call
+        return name, args, i, i + end
+    return None
 
 
 def _extract_plan(text: str) -> tuple[list[str], str]:
