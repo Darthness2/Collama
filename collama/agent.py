@@ -6,6 +6,36 @@ import re
 from pathlib import Path
 
 _TOOL_TAG_RX = re.compile(r"<tool>\s*(\{.*?\})\s*</tool>", re.DOTALL)
+_PLAN_RX = re.compile(r"<plan>(.*?)</plan>", re.DOTALL | re.IGNORECASE)
+_THINK_RX = re.compile(r"<think(?:ing)?>(.*?)</think(?:ing)?>", re.DOTALL | re.IGNORECASE)
+
+
+def _extract_plan(text: str) -> tuple[list[str], str]:
+    """Pull a <plan> block out of text. Returns (steps, text_without_plan)."""
+    m = _PLAN_RX.search(text)
+    if not m:
+        return [], text
+    body = m.group(1).strip()
+    # Accept either "1. step" / "- step" / one-per-line.
+    steps: list[str] = []
+    for raw in body.splitlines():
+        s = raw.strip()
+        if not s:
+            continue
+        s = re.sub(r"^(?:[-*•]|\d+[.)])\s*", "", s)
+        if s:
+            steps.append(s)
+    cleaned = (text[:m.start()] + text[m.end():]).strip()
+    return steps, cleaned
+
+
+def _extract_thinking(text: str) -> tuple[list[str], str]:
+    blocks = []
+    def _consume(m):
+        blocks.append(m.group(1).strip())
+        return ""
+    cleaned = _THINK_RX.sub(_consume, text).strip()
+    return blocks, cleaned
 
 # DeepSeek-Coder native tool-call format (uses unicode-bar special tokens).
 # Example:
@@ -99,6 +129,10 @@ To call a tool, emit EXACTLY one tag and STOP. Use either of these formats:
 After the tag, STOP. I — the harness — will run the tool and reply with the actual result. You then continue (call another tool, or write your final answer).
 When the task is complete, write your final answer as plain text with NO tool tag.
 
+PLAN FIRST: at the start of any non-trivial task, emit a numbered plan inside <plan>...</plan> (max ~6 steps). Then immediately call your first tool. The harness renders the plan in a panel for the user.
+
+OPTIONAL: wrap private reasoning in <think>...</think> — the harness will render it dimmed.
+
 CRITICAL — DO NOT FAKE TOOL OUTPUTS. Never produce <｜tool▁output▁…｜> or <｜tool▁outputs▁…｜> blocks; those are MINE to emit, not yours. If you write fake outputs, your changes did NOT actually happen and the user will see no files. Just emit the call tag and wait.
 
 Available tools (same names as native function calling):
@@ -140,6 +174,16 @@ Filesystem access:
 - Be careful with destructive operations. Always confirm intent before deleting or overwriting outside the workspace.
 
 Operating principles:
+- Plan first. For ANY non-trivial task (more than a single tool call), open your reply with a numbered plan in this exact format:
+
+    <plan>
+    1. first step
+    2. second step
+    3. third step
+    </plan>
+
+  Keep steps short (one line each, max ~6 steps). After the plan, immediately start executing — call the first tool. The harness renders the plan in a panel so the user sees what's coming.
+- Skip the plan only for trivial single-tool questions (e.g. "list this dir").
 - Be concise. The user is in a terminal; long answers are noise.
 - Don't ask the user to paste file contents — read files yourself with read_file.
 - Don't guess at code — verify with grep / read_file first.
@@ -147,6 +191,7 @@ Operating principles:
 - When making changes, briefly confirm what you did and any follow-ups the user should run (tests, lints).
 - One step at a time: call a tool, see the result, then decide.
 - When the task is complete, give a short final answer and stop calling tools.
+- If you want to think out loud privately, wrap it in <think>...</think>; the harness will render it dimmed.
 """
     if not tools_enabled:
         base += "\n" + TEXT_TOOL_PROTOCOL
@@ -222,6 +267,19 @@ class Agent:
                 pass
         return content
 
+    def _render_meta(self, content: str) -> str:
+        """Pull plan/thinking blocks out, render them, return remaining text."""
+        thinks, content = _extract_thinking(content)
+        for t in thinks:
+            if t:
+                ui.thinking(t)
+        if not getattr(self, "_plan_shown_this_turn", False):
+            steps, content = _extract_plan(content)
+            if steps:
+                ui.plan(steps)
+                self._plan_shown_this_turn = True
+        return content
+
     def _run_text_protocol(self) -> str:
         """Loop using the <tool>{json}</tool> text protocol — for models without native tool calls."""
         for _ in range(MAX_TOOL_ITERATIONS):
@@ -243,10 +301,11 @@ class Agent:
             had_fake_outputs = _Outputs.search(raw)
             cleaned = _Outputs.strip(raw).strip()
 
-            # Save the cleaned message, not the fabricated one.
+            # Save the cleaned message (without fakes).
             msg["content"] = cleaned
             self.messages.append(msg)
 
+            cleaned = self._render_meta(cleaned).strip()
             extracted = _extract_tool_call(cleaned)
 
             if not extracted:
@@ -291,6 +350,7 @@ class Agent:
     def turn(self, user_input: str) -> str:
         """Run one user-turn: send message, loop through tool calls, return final text."""
         self.messages.append({"role": "user", "content": user_input})
+        self._plan_shown_this_turn = False
 
         if not self.tools_enabled:
             return self._run_text_protocol()
@@ -323,27 +383,19 @@ class Agent:
             self.messages.append(msg)
 
             tool_calls = msg.get("tool_calls") or []
-            content = (msg.get("content") or "").strip()
+            raw_content = (msg.get("content") or "").strip()
+            content = self._render_meta(raw_content).strip()
 
             if content and not tool_calls:
                 ui.assistant(content)
-                if self.on_turn_complete:
-                    try:
-                        self.on_turn_complete(self)
-                    except Exception:
-                        pass
-                return content
+                return self._finish(content)
 
             if content and tool_calls:
-                ui.assistant(content)
+                # Inline narration between tool calls — render lightly, not as an answer panel.
+                print(ui.color("  ▪ ", ui.TEAL_DIM) + ui.color(content, ui.MUTED))
 
             if not tool_calls:
-                if self.on_turn_complete:
-                    try:
-                        self.on_turn_complete(self)
-                    except Exception:
-                        pass
-                return content
+                return self._finish(content)
 
             for call in tool_calls:
                 fn = call.get("function", {}) or {}
