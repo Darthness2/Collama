@@ -6,7 +6,7 @@ import os
 import sys
 from pathlib import Path
 
-from . import __version__, config, ui
+from . import __version__, config, sessions, ui
 from .agent import Agent
 from .ollama_client import OllamaClient, OllamaError
 
@@ -39,7 +39,12 @@ Slash commands:
   /login github <token>   save a GitHub Personal Access Token
   /logout github          remove the saved GitHub token
   /whoami                 show authenticated GitHub user
-  /clear                  reset conversation history
+  /clear                  reset conversation history (does not delete saved session)
+  /new [title]            start a new conversation
+  /resume [id|number]     list saved conversations or resume one
+  /sessions               list saved conversations
+  /save [title]           force-save the current conversation (sets title)
+  /delete <id|number>     delete a saved conversation
   /yolo                   toggle auto-approve for tool calls
   /exit, /quit            leave
 """
@@ -94,8 +99,48 @@ def _apply_to_agent(agent: Agent, cfg: dict) -> None:
     agent.ctx.yolo = bool(cfg.get("yolo", agent.ctx.yolo))
 
 
+def _autosave(session: dict, agent: Agent) -> None:
+    session["model"] = agent.model
+    session["messages"] = [m for m in agent.messages if m.get("role") != "system"]
+    sessions.save(session)
+
+
+def _print_sessions(active_id: str | None = None) -> list[dict]:
+    listed = sessions.list_all()
+    if not listed:
+        ui.info("(no saved conversations)")
+        return []
+    print()
+    print(ui.color(f"  {'#':<3} {'id':<14} {'updated':<10} {'turns':<6} {'model':<20} title", ui.GRAY))
+    for i, s in enumerate(listed, 1):
+        marker = ui.color(" *", ui.GREEN) if s["id"] == active_id else "  "
+        print(f"{marker}{i:<3} {s['id']:<14} {sessions.fmt_time(s['updated_at']):<10} "
+              f"{s['turns']:<6} {s['model'][:19]:<20} {s['title'][:60]}")
+    return listed
+
+
+def _resolve_session_arg(arg: str, listed: list[dict]) -> dict | None:
+    if not arg:
+        return None
+    if arg.isdigit():
+        idx = int(arg) - 1
+        if 0 <= idx < len(listed):
+            return listed[idx]
+        return None
+    for s in listed:
+        if s["id"] == arg or s["id"].startswith(arg):
+            return s
+    return None
+
+
 def repl(agent: Agent, cfg: dict) -> int:
     ui.banner(agent.model, str(agent.ctx.root))
+
+    # Active session (auto-created, auto-saved after each turn)
+    session = sessions.make(agent.model)
+    agent.on_turn_complete = lambda a: _autosave(session, a)
+    ui.info(f"new session: {session['id']}")
+
     while True:
         try:
             line = input(ui.color("\n› ", ui.BOLD)).strip()
@@ -194,6 +239,68 @@ def repl(agent: Agent, cfg: dict) -> int:
             if cmd == "clear":
                 agent.reset()
                 ui.info("history cleared")
+                continue
+            if cmd == "new":
+                # Save current (autosave already runs on turns; do a final save with title).
+                title = (arg1 + (" " + arg2 if arg2 else "")).strip() or None
+                if agent.messages and len(agent.messages) > 1:
+                    if title:
+                        session["title"] = title
+                    _autosave(session, agent)
+                    ui.info(f"saved {session['id']}")
+                # Spin up a fresh session.
+                session.clear()
+                session.update(sessions.make(agent.model, title=title))
+                agent.reset()
+                agent.on_turn_complete = lambda a: _autosave(session, a)
+                ui.info(f"new session: {session['id']}")
+                continue
+            if cmd == "resume":
+                listed = _print_sessions(active_id=session.get("id"))
+                if not arg1:
+                    if listed:
+                        ui.info("usage: /resume <id|number>")
+                    continue
+                target = _resolve_session_arg(arg1, listed)
+                if not target:
+                    ui.warn(f"no session matching '{arg1}'")
+                    continue
+                data = sessions.load(target["id"])
+                if not data:
+                    ui.error(f"could not load {target['id']}")
+                    continue
+                # Save the current session before swapping.
+                if len(agent.messages) > 1:
+                    _autosave(session, agent)
+                session.clear()
+                session.update(data)
+                agent.model = data.get("model") or agent.model
+                agent.load_messages(data.get("messages", []))
+                agent.on_turn_complete = lambda a: _autosave(session, a)
+                ui.info(f"resumed {session['id']} — {session.get('title', '')}")
+                continue
+            if cmd == "sessions":
+                _print_sessions(active_id=session.get("id"))
+                continue
+            if cmd == "save":
+                if arg1 or arg2:
+                    session["title"] = (arg1 + (" " + arg2 if arg2 else "")).strip()
+                _autosave(session, agent)
+                ui.info(f"saved {session['id']} — {session.get('title', '')}")
+                continue
+            if cmd == "delete":
+                listed = sessions.list_all()
+                target = _resolve_session_arg(arg1, listed)
+                if not target:
+                    ui.warn(f"no session matching '{arg1}'")
+                    continue
+                if target["id"] == session.get("id"):
+                    ui.warn("can't delete the active session — use /new first")
+                    continue
+                if sessions.delete(target["id"]):
+                    ui.info(f"deleted {target['id']}")
+                else:
+                    ui.warn("delete failed")
                 continue
             if cmd == "yolo":
                 agent.ctx.yolo = not agent.ctx.yolo

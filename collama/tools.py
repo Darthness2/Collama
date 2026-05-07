@@ -24,7 +24,8 @@ def _truncate(s: str, limit: int = MAX_OUTPUT_CHARS) -> str:
 
 
 def _resolve(path: str, root: Path) -> Path:
-    p = Path(path)
+    expanded = os.path.expanduser(os.path.expandvars(path))
+    p = Path(expanded)
     if not p.is_absolute():
         p = root / p
     return p
@@ -75,16 +76,22 @@ def t_read_file(args: dict, ctx: ToolContext) -> str:
 
 
 def t_write_file(args: dict, ctx: ToolContext) -> str:
+    from . import diff as _diff
     path = args["path"]
     content = args["content"]
     p = _resolve(path, ctx.root)
     existed = p.exists()
+    old_text = p.read_text(errors="replace") if existed else ""
     detail = f"{'overwrite' if existed else 'create'} {path} ({len(content)} bytes)"
     if not ctx.confirm("file write", detail):
         return "ERROR: user denied write"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content)
-    return f"OK: wrote {path} ({len(content)} bytes, {'overwrote' if existed else 'created'})"
+    rendered = _diff.render(old_text, content, path)
+    if rendered:
+        print(rendered)
+    adds, dels = _diff.stats(old_text, content)
+    return f"OK: wrote {path} ({'overwrote' if existed else 'created'}, +{adds} -{dels} lines)"
 
 
 def t_edit_file(args: dict, ctx: ToolContext) -> str:
@@ -105,7 +112,12 @@ def t_edit_file(args: dict, ctx: ToolContext) -> str:
         return "ERROR: user denied edit"
     new_text = text.replace(old, new) if replace_all else text.replace(old, new, 1)
     p.write_text(new_text)
-    return f"OK: edited {path} ({count} replacement(s))"
+    from . import diff as _diff
+    rendered = _diff.render(text, new_text, path)
+    if rendered:
+        print(rendered)
+    adds, dels = _diff.stats(text, new_text)
+    return f"OK: edited {path} ({count} replacement(s), +{adds} -{dels} lines)"
 
 
 def t_list_dir(args: dict, ctx: ToolContext) -> str:

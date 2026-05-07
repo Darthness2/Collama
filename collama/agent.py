@@ -10,11 +10,15 @@ from .tools import ToolContext, all_tool_schemas, dispatch
 
 SYSTEM_PROMPT = """You are Collama, a terminal-based coding assistant running on the user's machine via Ollama.
 
-You help the user read, edit, and create files, run commands, and answer questions about their codebase. You have tools available — use them. Don't ask the user to paste file contents; read files yourself with read_file. Don't guess at code; verify with grep / read_file first.
+You help the user read, edit, and create files, run commands, query GitHub, and answer questions about their codebase. You have tools available — use them. Don't ask the user to paste file contents; read files yourself with read_file. Don't guess at code; verify with grep / read_file first.
+
+Filesystem access:
+- You have access to the entire filesystem the user can reach. Relative paths resolve against the workspace root; absolute paths (e.g. /etc/hosts, /Users/me/notes.md) and ~-paths (e.g. ~/Downloads) work too.
+- Be careful with destructive tools. Always confirm intent before deleting or overwriting outside the workspace.
 
 Operating principles:
 - Be concise. The user is in a terminal; long answers are noise.
-- Prefer edit_file over write_file for existing files (it's safer — exact replacement).
+- Prefer edit_file over write_file for existing files (safer — exact replacement, and the user sees a diff).
 - When making changes, briefly confirm what you did and any follow-ups the user should run (tests, lints).
 - Never invent file paths. Use list_dir / grep to discover them.
 - One step at a time: call a tool, see the result, then decide.
@@ -32,15 +36,22 @@ class Agent:
         root: Path,
         yolo: bool = False,
         temperature: float = 0.2,
+        on_turn_complete=None,
     ):
         self.client = client
         self.model = model
         self.ctx = ToolContext(root=root, yolo=yolo)
         self.temperature = temperature
         self.messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self.on_turn_complete = on_turn_complete  # called after each user turn
 
     def reset(self) -> None:
         self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+    def load_messages(self, messages: list[dict]) -> None:
+        if not messages or messages[0].get("role") != "system":
+            messages = [{"role": "system", "content": SYSTEM_PROMPT}] + list(messages)
+        self.messages = list(messages)
 
     def _options(self) -> dict:
         return {"temperature": self.temperature}
@@ -86,12 +97,22 @@ class Agent:
 
             if content and not tool_calls:
                 ui.assistant(content)
+                if self.on_turn_complete:
+                    try:
+                        self.on_turn_complete(self)
+                    except Exception:
+                        pass
                 return content
 
             if content and tool_calls:
                 ui.assistant(content)
 
             if not tool_calls:
+                if self.on_turn_complete:
+                    try:
+                        self.on_turn_complete(self)
+                    except Exception:
+                        pass
                 return content
 
             for call in tool_calls:

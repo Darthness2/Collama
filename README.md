@@ -71,7 +71,12 @@ collama --reset-config
 /login github <token>   save a GitHub Personal Access Token
 /logout github          remove the saved GitHub token
 /whoami                 show authenticated GitHub user
-/clear                  reset conversation history
+/clear                  reset conversation history (does not delete the saved session)
+/new [title]            start a new conversation
+/resume [id|number]     list saved conversations or resume one
+/sessions               list saved conversations
+/save [title]           force-save / set the title of the current conversation
+/delete <id|number>     delete a saved conversation
 /yolo                   toggle auto-approve for tool calls
 /exit                   quit
 ```
@@ -107,6 +112,28 @@ Once logged in, the model can call: `gh_whoami`, `gh_list_repos`,
 
 File-mutating and shell tools require interactive approval. Pass `--yolo` (or
 `/yolo`) to auto-approve everything — use with care.
+
+Whenever the model writes or edits a file, Collama prints a colorized unified
+diff (green `+`, red `-`) so you can see exactly what changed.
+
+## Filesystem access
+
+Collama can read and write any file your user account can. Relative paths
+resolve against the workspace root (`-C`/cwd); absolute paths and `~`-paths
+work too — e.g. `~/Downloads/report.md`, `/etc/hosts`.
+
+## Conversations
+
+Every session is auto-saved to `~/.config/collama/sessions/<id>.json` after
+each turn. Manage them with:
+
+```
+/sessions              list everything
+/new [title]           start fresh
+/resume                list and resume by id or number
+/save [title]          force-save with a title
+/delete <id|number>    remove a saved session
+```
 
 ## License
 
