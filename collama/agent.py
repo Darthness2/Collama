@@ -36,12 +36,15 @@ class Agent:
             yolo=yolo,
             tools_enabled=tools_enabled,
         )
+        from .permissions import terminal_resolver
         self.engine = QueryEngine(
             client=client,
             state=self.state,
             model=model,
             temperature=temperature,
             config=config,
+            permission_resolver=terminal_resolver,
+            stream=False,  # REPL keeps a single spinner; no in-line deltas
         )
         self.client = client
         self.on_turn_complete = on_turn_complete
@@ -128,5 +131,19 @@ def render_event(event: Message, final_text: str) -> str:
     elif k == "error":
         ui.error(d["text"])
     elif k == "compact":
-        ui.info(f"context auto-compacted: {d['before']} → {d['after']} approx tokens")
+        strategy = d.get("strategy", "compact")
+        ui.info(f"context {strategy}: {d['before']} → {d['after']} approx tokens")
+    elif k == "tool_denied":
+        ui.warn(f"permission denied: {d['name']} ({d['reason']})")
+    elif k == "delta":
+        # SDK consumers can render incrementally; the REPL ignores deltas.
+        pass
+    elif k == "done":
+        usage = d.get("usage", {})
+        if any(usage.values()):
+            print(ui.color(
+                f"  ↳ tokens in/out {usage.get('input', 0)}/{usage.get('output', 0)}"
+                f"  · {usage.get('ms', 0)}ms",
+                ui.SOFT,
+            ))
     return final_text

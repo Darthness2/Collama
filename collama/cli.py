@@ -146,6 +146,7 @@ def repl(agent: Agent, cfg: dict) -> int:
     # Active session (auto-created, auto-saved after each turn)
     session = sessions.make(agent.model)
     agent.on_turn_complete = lambda a: _autosave(session, a)
+    agent.engine.session_id = session["id"]
     ui.info(f"new session: {session['id']}")
 
     prompt = Prompt()
@@ -321,6 +322,7 @@ def repl(agent: Agent, cfg: dict) -> int:
                 session.update(sessions.make(agent.model, title=title))
                 agent.reset()
                 agent.on_turn_complete = lambda a: _autosave(session, a)
+                agent.engine.session_id = session["id"]
                 ui.info(f"new session: {session['id']}")
                 continue
             if cmd == "resume":
@@ -345,6 +347,7 @@ def repl(agent: Agent, cfg: dict) -> int:
                 agent.model = data.get("model") or agent.model
                 agent.load_messages(data.get("messages", []))
                 agent.on_turn_complete = lambda a: _autosave(session, a)
+                agent.engine.session_id = session["id"]
                 ui.info(f"resumed {session['id']} — {session.get('title', '')}")
                 continue
             if cmd == "sessions":

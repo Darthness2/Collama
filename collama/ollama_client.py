@@ -99,7 +99,10 @@ class OllamaClient:
                 stream=True,
             ) as r:
                 if r.status_code != 200:
-                    raise OllamaError(f"chat HTTP {r.status_code}: {r.text[:500]}")
+                    body = r.text[:500]
+                    if r.status_code == 400 and tools and _looks_like_tools_error(body):
+                        raise ToolsUnsupportedError(body)
+                    raise OllamaError(f"chat HTTP {r.status_code}: {body}")
                 for line in r.iter_lines(decode_unicode=True):
                     if not line:
                         continue
@@ -109,3 +112,41 @@ class OllamaClient:
                         continue
         except requests.RequestException as e:
             raise OllamaError(f"streaming chat failed: {e}") from e
+
+    def chat_stream_assembled(
+        self,
+        model: str,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        options: dict | None = None,
+    ) -> Iterator[tuple[str, Any]]:
+        """Higher-level streaming: yields ('delta', text) events as content
+        arrives, then a single ('done', payload) with the fully assembled
+        message and usage counters.
+
+            payload = {
+                'message': {'role','content','tool_calls'},
+                'eval_count': int,
+                'prompt_eval_count': int,
+                'total_duration_ns': int,
+            }
+        """
+        full = ""
+        for chunk in self.chat_stream(model, messages, tools, options):
+            msg = chunk.get("message") or {}
+            delta = msg.get("content") or ""
+            if delta:
+                full += delta
+                yield ("delta", delta)
+            if chunk.get("done"):
+                yield ("done", {
+                    "message": {
+                        "role": msg.get("role", "assistant"),
+                        "content": full,
+                        "tool_calls": msg.get("tool_calls") or [],
+                    },
+                    "eval_count": int(chunk.get("eval_count") or 0),
+                    "prompt_eval_count": int(chunk.get("prompt_eval_count") or 0),
+                    "total_duration_ns": int(chunk.get("total_duration") or 0),
+                })
+                return

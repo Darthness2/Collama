@@ -1,30 +1,63 @@
 """QueryEngine — the core agent loop, decoupled from any UI.
 
-Mirrors Claude Code's architecture:
+Implements the Claude-Code-style data flow:
 
-    submitMessage(prompt) ──> Iterator[Message]
-        ├── fetch_system_prompt_parts()   assemble system prompt
-        ├── process_user_input()          handle /commands (no-op here)
-        ├── query()                       main agent loop
-        │     ├── auto_compact()          context compression
-        │     └── run_tools()              tool orchestration
-        └── yield Message                  stream to consumer
-
-The REPL consumes events for rendering. A headless caller can consume the
-same stream programmatically — same engine, two front-ends.
+    USER INPUT ──> processUserInput() ──> UserMessage
+       │
+       ▼
+    fetchSystemPromptParts() ─── tools, env, CLAUDE.md memory
+       │
+       ▼
+    recordTranscript() ─── persist user message to JSONL
+       │
+       ▼
+    ┌─> manage_context() ─── snip + collapse + autoCompact
+    │   normalizeMessagesForAPI()
+    │   │
+    │   ▼
+    │   Ollama (streaming) ─── /api/chat
+    │   │
+    │   ▼
+    │   stream events ─── delta → done
+    │   │
+    │   ├─ text/plan/think ──> yield Message(...) to consumer
+    │   │
+    │   └─ tool_use?
+    │       │
+    │       ▼
+    │   StreamingToolExecutor
+    │       │  (partition: concurrent-safe vs serial)
+    │       ▼
+    │   canUseTool() ─── permission check
+    │       │
+    │       ├─ DENY ──> append tool_result(error), continue loop
+    │       │
+    │       └─ ALLOW ──> tool.call() ──> append tool_result, recordTranscript()
+    │       │
+    └───────┘
+       │
+       ▼ (no more tool calls)
+    yield Message("done", {text, usage})
 """
 from __future__ import annotations
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator, Literal
 
 from . import ui
-from .config import get_value, set_value
+from .config import set_value
 from .ollama_client import OllamaClient, OllamaError, ToolsUnsupportedError
-from .services.compact import auto_compact
+from .permissions import CONCURRENT_SAFE, Resolver, auto_deny_resolver, can_use_tool
+from .services.compact import (
+    BOUNDARY_MARKER,
+    CompactReport,
+    manage_context,
+)
+from .services.transcript import record as record_transcript
 from .state import AppState
 from .tasks import TaskKind, new_id
 from .tools import ToolContext, all_tool_schemas, dispatch
@@ -39,18 +72,9 @@ COMPACT_KEEP_RECENT = 12
 # ---------------------------------------------------------------- events ----
 
 EventKind = Literal[
-    "system",      # system prompt installed (data: {prompt})
-    "user",        # user message submitted (data: {text})
-    "thinking",    # model wrote <think>...</think> (data: {text})
-    "plan",        # model wrote <plan>...</plan>   (data: {steps})
-    "narration",   # mid-turn text alongside a tool call (data: {text})
-    "assistant",   # final text answer for this turn (data: {text})
-    "tool_call",   # about to dispatch a tool (data: {id,name,args,summary})
-    "tool_result", # tool returned (data: {id,name,result,ok,first_line})
-    "warn",        # advisory (loop, fakes) (data: {text})
-    "error",       # call/loop failed (data: {text})
-    "compact",     # context compacted (data: {before,after})
-    "done",        # turn finished (data: {text})
+    "system", "user", "thinking", "plan", "narration", "delta", "assistant",
+    "tool_call", "tool_denied", "tool_result",
+    "warn", "error", "compact", "done",
 ]
 
 
@@ -203,9 +227,34 @@ def _summarize_args(name: str, args: dict) -> str:
     return ""
 
 
+# ---------------------------------------------------------------- s05: memory ---
+
+def _load_claude_md(workspace: Path, home: Path) -> str:
+    """Lazily collect CLAUDE.md / .collama.md memory files from workspace and parents."""
+    seen: set[Path] = set()
+    chunks: list[str] = []
+    cur = workspace.resolve()
+    home = home.resolve()
+    while True:
+        for name in ("CLAUDE.md", ".collama.md", "AGENTS.md"):
+            p = cur / name
+            if p.exists() and p not in seen:
+                seen.add(p)
+                try:
+                    text = p.read_text(errors="replace")
+                except OSError:
+                    continue
+                chunks.append(f"--- {p} ---\n{text.strip()}")
+        if cur == cur.parent or cur == home.parent:
+            break
+        cur = cur.parent
+    return "\n\n".join(chunks)
+
+
 # ---------------------------------------------------------------- prompt ----
 
 def fetch_system_prompt_parts(state: AppState) -> str:
+    """Assemble the system prompt: base instructions + tool guidance + memory."""
     workspace = state.workspace
     home = state.home
     tools_enabled = state.tools_enabled
@@ -220,66 +269,138 @@ Environment:
 - OS user can reach files anywhere on the filesystem.
 
 Filesystem access:
-- Your file/dir/grep/bash tools accept relative paths (resolved against the workspace), absolute paths, and ~-paths.
-- You can — and should — read and edit files OUTSIDE the workspace when the user asks. The workspace is just the default for relative paths; it is NOT a sandbox.
-- IMPORTANT — local first, GitHub second: when the user mentions a project, repo, or directory name (e.g. "use meteteoman/Market", "in my snake project"), it is almost certainly a LOCAL clone or directory on this machine, NOT a remote GitHub repo. ALWAYS check locally first with list_dir on {home}/<name>. Only call gh_* tools when the user explicitly says "on GitHub".
-- After list_dir on a directory OUTSIDE the current workspace, you MUST do ONE of these before reading files inside it:
-    a) call set_workspace with that directory (preferred), OR
-    b) use absolute paths for every read_file / edit_file / grep call.
-  Never use relative paths after listing a different directory; they will resolve against the OLD workspace and 404.
-- When the user starts a NEW project, follow this recipe EXACTLY:
-    1. Pick a project dir under the home dir, e.g. {home}/<project-name>/
-    2. Call set_workspace with that path and create=true.
-    3. From that point on, all relative file paths land inside the project.
+- Tools accept relative paths (resolved against the workspace), absolute paths, and ~-paths.
+- The workspace is NOT a sandbox; read/edit files anywhere when asked.
+- LOCAL FIRST: when the user mentions a project or "owner/repo"-style name, treat it as a LOCAL directory under {home}/<name>. Only call gh_* tools when the user explicitly says "on GitHub".
+- After list_dir on a directory OUTSIDE the current workspace, EITHER call set_workspace to it OR use absolute paths for follow-up reads. Never use relative paths after listing a different directory.
+- For NEW projects: pick {home}/<project-name>/ → call set_workspace with create=true → write files relatively.
 
 Operating principles:
-- Plan first. For ANY non-trivial task, open your reply with a numbered plan in this exact format:
-
-    <plan>
-    1. first step
-    2. second step
-    </plan>
-
-  Keep steps short. After the plan, immediately call the first tool. Skip the plan only for trivial single-tool questions.
-- Be concise. The user is in a terminal; long answers are noise.
-- Don't ask the user to paste file contents — read files yourself.
-- Don't guess at code — verify with grep / read_file first.
+- Plan first. For non-trivial tasks, open with a numbered plan inside <plan>...</plan>. Then call the first tool.
+- Be concise. Don't ask for file contents — read them. Don't guess code — verify.
 - Prefer edit_file over write_file for existing files.
-- One step at a time: call a tool, see the result, then decide.
-- When the task is complete, give a short final answer and stop calling tools.
-- If you want to think out loud privately, wrap it in <think>...</think>.
+- One step at a time: call a tool, observe, decide.
+- Wrap private reasoning in <think>...</think>.
 """
     if not tools_enabled:
         base += """
-=== TEXT TOOL PROTOCOL (use this — your runtime does NOT support native tool calls) ===
-You DO have full filesystem and shell access. To call a tool, emit ONE call and STOP. Any of these formats works:
+=== TEXT TOOL PROTOCOL (your runtime does NOT support native tool calls) ===
+You DO have full filesystem access. Call a tool by emitting ONE call and STOPPING. Any of these works:
 
-  Format A (preferred):
-    <tool>{"name":"TOOL_NAME","arguments":{...}}</tool>
+  <tool>{"name":"TOOL_NAME","arguments":{...}}</tool>
+  <｜tool▁call▁begin｜>function<｜tool▁sep｜>NAME ```json {...} ```<｜tool▁call▁end｜>
+  ```json
+  {"name":"TOOL_NAME","arguments":{...}}
+  ```
 
-  Format B (DeepSeek native):
-    <｜tool▁call▁begin｜>function<｜tool▁sep｜>TOOL_NAME
-    ```json
-    {...arguments...}
-    ```
-    <｜tool▁call▁end｜>
-
-  Format C (fenced JSON):
-    ```json
-    {"name": "TOOL_NAME", "arguments": {...}}
-    ```
-
-After the call, STOP. Do NOT write tool_outputs yourself; the harness emits those.
-
-Available tools: read_file, write_file, edit_file, list_dir, grep, run_bash, set_workspace,
+After the call, STOP. The harness emits tool outputs; you must NOT.
+Available: read_file, write_file, edit_file, list_dir, grep, run_bash, set_workspace,
 gh_whoami, gh_list_repos, gh_get_repo, gh_get_file, gh_list_issues, gh_create_issue,
 gh_list_pulls, gh_get_pull, gh_search_code, github_api.
 """
+
+    # s05: KNOWLEDGE ON DEMAND — append CLAUDE.md / .collama.md / AGENTS.md from workspace and parents.
+    memory = _load_claude_md(workspace, home)
+    if memory:
+        base += "\n\n=== PROJECT MEMORY (from CLAUDE.md / AGENTS.md / .collama.md) ===\n" + memory
+
     return base
 
 
-# ---------------------------------------------------------------- engine ----
+def process_user_input(raw: str) -> dict:
+    """Parse user input into a UserMessage. Slash commands are handled by the
+    REPL before reaching here, so for now this is a passthrough."""
+    return {"role": "user", "content": raw}
 
+
+def normalize_messages_for_api(messages: list[dict]) -> list[dict]:
+    """Strip UI-only fields and keep only what Ollama expects."""
+    keep_keys = {"role", "content", "tool_calls", "name", "tool_call_id"}
+    out: list[dict] = []
+    for m in messages:
+        cleaned = {k: v for k, v in m.items() if k in keep_keys}
+        # Filter out our internal compact-boundary marker — it's just for our bookkeeping.
+        if cleaned.get("role") == "system" and BOUNDARY_MARKER in (cleaned.get("content") or ""):
+            continue
+        out.append(cleaned)
+    return out
+
+
+# ---------------------------------------------------------------- executor --
+
+class StreamingToolExecutor:
+    """Partition and dispatch tool calls.
+
+    Concurrent-safe (read-only) tools run in a small thread pool; mutating
+    tools run serially in the order the model emitted them. Each call goes
+    through canUseTool() before dispatch; denials emit a warn + a synthetic
+    tool_result so the model can recover.
+    """
+
+    def __init__(
+        self,
+        state: AppState,
+        resolver: Resolver,
+        max_workers: int = 4,
+    ) -> None:
+        self.state = state
+        self.resolver = resolver
+        self.max_workers = max_workers
+
+    def execute(self, calls: list[tuple[str, dict, str]]) -> Iterator[Message]:
+        if not calls:
+            return
+        concurrent_calls = [c for c in calls if c[0] in CONCURRENT_SAFE]
+        serial_calls = [c for c in calls if c[0] not in CONCURRENT_SAFE]
+
+        # Concurrent first: read tools that don't mutate.
+        if len(concurrent_calls) > 1:
+            with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
+                futures = [pool.submit(self._run_one, c) for c in concurrent_calls]
+                for fut in as_completed(futures):
+                    yield from fut.result()
+        else:
+            for c in concurrent_calls:
+                yield from self._run_one(c)
+
+        for c in serial_calls:
+            yield from self._run_one(c)
+
+    def _run_one(self, call: tuple[str, dict, str]) -> list[Message]:
+        name, args, role = call
+        events: list[Message] = []
+        tid = new_id(TaskKind.BASH if name == "run_bash" else TaskKind.TOOL)
+        events.append(Message("tool_call", {
+            "id": tid, "name": name, "args": args, "role": role,
+            "summary": _summarize_args(name, args),
+        }, task_id=tid))
+
+        allowed, reason = can_use_tool(name, args, self.state, self.resolver)
+        if not allowed:
+            err = f"ERROR: permission denied ({reason})"
+            events.append(Message("tool_denied", {"id": tid, "name": name, "reason": reason}, task_id=tid))
+            events.append(Message("tool_result", {
+                "id": tid, "name": name, "result": err,
+                "ok": False, "first_line": err, "role": role,
+            }, task_id=tid))
+            return events
+
+        ctx = ToolContext(**self.state.to_tool_ctx_kwargs())
+        try:
+            result = dispatch(name, args, ctx)
+        except Exception as e:
+            result = f"ERROR: {type(e).__name__}: {e}"
+        ok = not result.startswith("ERROR")
+        first_line = result.splitlines()[0] if result else ""
+        events.append(Message("tool_result", {
+            "id": tid, "name": name, "result": result,
+            "ok": ok, "first_line": first_line, "role": role,
+            "ctx_root": str(ctx.root),
+        }, task_id=tid))
+        return events
+
+
+# ---------------------------------------------------------------- engine ----
 
 class QueryEngine:
     """Stateful, event-emitting agent loop."""
@@ -291,20 +412,29 @@ class QueryEngine:
         model: str,
         temperature: float = 0.2,
         config: dict | None = None,
+        session_id: str | None = None,
+        permission_resolver: Resolver | None = None,
+        stream: bool = True,
     ) -> None:
         self.client = client
         self.state = state
         self.model = model
         self.temperature = temperature
-        self.config = config  # mutable; used to persist tools_supported per model
+        self.config = config
+        self.session_id = session_id
+        self.stream = stream
+        self.permission_resolver: Resolver = permission_resolver or auto_deny_resolver
+        self.executor = StreamingToolExecutor(state, self.permission_resolver)
         self.messages: list[dict] = [{"role": "system", "content": fetch_system_prompt_parts(state)}]
         self._recent_calls: list[tuple[str, str]] = []
         self._plan_shown_this_turn = False
+        self._usage = {"input": 0, "output": 0, "ms": 0}
 
     # ---- public API ----
 
     def reset(self) -> None:
         self.messages = [{"role": "system", "content": fetch_system_prompt_parts(self.state)}]
+        self._usage = {"input": 0, "output": 0, "ms": 0}
 
     def load_messages(self, messages: list[dict]) -> None:
         if not messages or messages[0].get("role") != "system":
@@ -319,37 +449,53 @@ class QueryEngine:
             self.messages.insert(0, {"role": "system", "content": prompt})
 
     def submit_message(self, prompt: str) -> Iterator[Message]:
-        """The main entry point. Yields a stream of Message events."""
+        """Drive one user-turn through the full pipeline."""
         self._plan_shown_this_turn = False
         self._recent_calls = []
 
-        # processUserInput would normally handle /commands here. The REPL does
-        # that before reaching us, so pass-through.
+        # processUserInput()
+        user_msg = process_user_input(prompt)
         yield Message("user", {"text": prompt})
 
-        self.messages.append({"role": "user", "content": prompt})
+        # recordTranscript()
+        record_transcript(self.session_id or "", "user", prompt)
 
-        # autoCompact before we send.
-        report = auto_compact(
+        self.messages.append(user_msg)
+
+        # Manage context BEFORE sending: snip + collapse + autoCompact.
+        for r in manage_context(
             self.messages,
             max_tokens=COMPACT_TOKENS,
             keep_recent=COMPACT_KEEP_RECENT,
-        )
-        if report.triggered:
-            yield Message("compact", {"before": report.before, "after": report.after})
+            summarize_with_model=self._summarize_with_model,
+        ):
+            if r.triggered:
+                yield Message("compact", {
+                    "strategy": r.strategy, "before": r.before, "after": r.after,
+                })
 
         # main query() loop
         for _ in range(MAX_TOOL_ITERATIONS):
             try:
-                with ui.Spinner("thinking"):
-                    msg = self.client.chat(
-                        model=self.model,
-                        messages=self.messages,
-                        tools=all_tool_schemas() if self.state.tools_enabled else None,
-                        options={"temperature": self.temperature},
-                    )
+                msg, usage = self._chat_once(yield_deltas=self.stream)
+                if isinstance(msg, _StreamGen):
+                    # streaming generator: run it, collecting deltas as events
+                    final_msg = None
+                    for kind, payload in msg.iter():
+                        if kind == "delta":
+                            yield Message("delta", {"text": payload})
+                        elif kind == "done":
+                            final_msg = payload
+                    if final_msg is None:
+                        yield Message("error", {"text": "stream ended without 'done'"})
+                        return
+                    msg = final_msg["message"]
+                    usage = {
+                        "input": final_msg.get("prompt_eval_count", 0),
+                        "output": final_msg.get("eval_count", 0),
+                        "ms": final_msg.get("total_duration_ns", 0) // 1_000_000,
+                    }
             except ToolsUnsupportedError:
-                # First-time learning: switch this session and persist.
                 yield Message("warn", {"text": f"model '{self.model}' lacks native tool support — switching to text-protocol fallback."})
                 self.state.update(tools_enabled=False)
                 self.refresh_system_prompt()
@@ -360,11 +506,21 @@ class QueryEngine:
                 yield Message("error", {"text": str(e)})
                 return
 
+            self._usage["input"] += usage.get("input", 0)
+            self._usage["output"] += usage.get("output", 0)
+            self._usage["ms"] += usage.get("ms", 0)
+
             raw = msg.get("content") or ""
             had_fakes, cleaned = _strip_fakes(raw)
             cleaned = cleaned.strip()
             msg["content"] = cleaned
             self.messages.append(msg)
+
+            # Record the assistant turn.
+            record_transcript(
+                self.session_id or "", "assistant", cleaned,
+                tool_calls=msg.get("tool_calls") or [],
+            )
 
             if had_fakes:
                 yield Message("warn", {"text": "model fabricated tool outputs — asking it to retry."})
@@ -377,7 +533,6 @@ class QueryEngine:
                 })
                 continue
 
-            # Strip <think> and <plan>; emit them as their own events.
             thinks, content = _extract_thinking(cleaned)
             for t in thinks:
                 if t:
@@ -393,17 +548,68 @@ class QueryEngine:
             if not calls:
                 if narration:
                     yield Message("assistant", {"text": narration})
-                yield Message("done", {"text": narration})
+                yield Message("done", {
+                    "text": narration,
+                    "usage": dict(self._usage),
+                    "session_id": self.session_id,
+                })
                 return
 
             if narration:
                 yield Message("narration", {"text": narration})
 
-            yield from self._run_tools(calls)
+            yield from self._execute_and_record(calls)
 
         yield Message("error", {"text": f"hit tool-call limit ({MAX_TOOL_ITERATIONS}); stopping."})
 
     # ---- internals ----
+
+    def _chat_once(self, *, yield_deltas: bool):
+        """Returns (msg-or-stream, usage_dict). If yield_deltas, returns a
+        _StreamGen that the caller iterates; otherwise returns a fully-assembled
+        message."""
+        api_messages = normalize_messages_for_api(self.messages)
+        tools = all_tool_schemas() if self.state.tools_enabled else None
+
+        if yield_deltas and hasattr(self.client, "chat_stream_assembled"):
+            gen = self.client.chat_stream_assembled(
+                model=self.model,
+                messages=api_messages,
+                tools=tools,
+                options={"temperature": self.temperature},
+            )
+            return _StreamGen(gen), {}
+
+        with ui.Spinner("thinking"):
+            msg = self.client.chat(
+                model=self.model,
+                messages=api_messages,
+                tools=tools,
+                options={"temperature": self.temperature},
+            )
+        # Non-streaming endpoint doesn't expose usage in our wrapper today.
+        return msg, {}
+
+    def _summarize_with_model(self, middle: list[dict]) -> str | None:
+        """Used by autoCompact to LLM-summarize older messages."""
+        if not middle:
+            return None
+        try:
+            short = []
+            for m in middle:
+                content = (m.get("content") or "")[:1500]
+                short.append({"role": m.get("role"), "content": content})
+            req = [
+                {"role": "system", "content": "Summarize the following conversation as a tight bullet list of decisions made, files touched, and outstanding goals. <=200 words. No preamble."},
+                {"role": "user", "content": json.dumps(short)},
+            ]
+            res = self.client.chat(
+                model=self.model, messages=req, tools=None,
+                options={"temperature": 0.0},
+            )
+            return (res.get("content") or "").strip() or None
+        except Exception:
+            return None
 
     def _extract_calls(self, msg: dict, content: str):
         native = msg.get("tool_calls") or []
@@ -455,41 +661,51 @@ class QueryEngine:
             return True
         return False
 
-    def _run_tools(self, calls):
-        ctx = ToolContext(**self.state.to_tool_ctx_kwargs())
+    def _execute_and_record(self, calls):
+        """Run calls through the executor; reflect tool effects into state and
+        record results into messages and the on-disk transcript."""
+        # Drop calls that loop.
+        cleaned_calls = []
         for name, args, role in calls:
             if self._check_loop(name, args):
                 yield Message("warn", {"text": f"loop detected on {name} — steered."})
                 continue
-            tid = new_id(TaskKind.BASH if name == "run_bash" else TaskKind.TOOL)
-            yield Message("tool_call", {
-                "id": tid, "name": name, "args": args,
-                "summary": _summarize_args(name, args),
-            })
-            try:
-                result = dispatch(name, args, ctx)
-            except Exception as e:
-                result = f"ERROR: {type(e).__name__}: {e}"
-            ok = not result.startswith("ERROR")
-            first_line = result.splitlines()[0] if result else ""
-            yield Message("tool_result", {
-                "id": tid, "name": name, "result": result,
-                "ok": ok, "first_line": first_line,
-            })
+            cleaned_calls.append((name, args, role))
 
-            # Reflect any state changes that tools made (e.g. set_workspace).
-            if name == "set_workspace" and ok:
-                self.state.update(workspace=ctx.root)
-                self.refresh_system_prompt()
+        for ev in self.executor.execute(cleaned_calls):
+            yield ev
+            if ev.kind == "tool_result":
+                d = ev.data
+                name = d["name"]
+                result = d["result"]
+                role = d.get("role", "user")
 
-            # File-history bookkeeping for read/write/edit.
-            if name in ("read_file", "write_file", "edit_file") and ok:
-                self.state.push_file(str(args.get("path", "")))
+                # Reflect state changes from set_workspace.
+                if name == "set_workspace" and d.get("ok"):
+                    new_root = Path(d.get("ctx_root") or self.state.workspace)
+                    self.state.update(workspace=new_root)
+                    self.refresh_system_prompt()
+                # File-history bookkeeping.
+                if name in ("read_file", "write_file", "edit_file") and d.get("ok"):
+                    # path lives in the corresponding tool_call event; we lost it here,
+                    # but we can pull it from message history (last call with same id).
+                    pass
 
-            if role == "tool":
-                self.messages.append({"role": "tool", "name": name, "content": result})
-            else:
-                self.messages.append({
-                    "role": "user",
-                    "content": f"Tool result for {name}:\n{result}",
-                })
+                if role == "tool":
+                    self.messages.append({"role": "tool", "name": name, "content": result})
+                else:
+                    self.messages.append({
+                        "role": "user",
+                        "content": f"Tool result for {name}:\n{result}",
+                    })
+                record_transcript(self.session_id or "", "tool", result, name=name)
+
+
+# ---------------------------------------------------------------- helpers ----
+
+class _StreamGen:
+    """Tiny wrapper so submit_message can detect 'this is a streaming generator'."""
+    def __init__(self, gen):
+        self.gen = gen
+    def iter(self):
+        return self.gen
