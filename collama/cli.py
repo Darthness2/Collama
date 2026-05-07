@@ -34,6 +34,7 @@ Slash commands:
   /tools                  list tools the model can call (and current mode)
   /tools-on               force native tool calls for this model (saves)
   /tools-off              force text-protocol tool fallback for this model (saves)
+  /cd [path]              show or change the workspace directory
   /diag                   print model / workspace / home / tools / github status
   /model [name]           show or switch model
   /models                 list locally installed Ollama models
@@ -186,6 +187,18 @@ def repl(agent: Agent, cfg: dict) -> int:
                 config.set_value(cfg, f"models.{agent.model}.tools_supported", False)
                 config.save(cfg)
                 ui.info(f"using text-protocol fallback for '{agent.model}' (saved).")
+                continue
+            if cmd == "cd":
+                if not arg1:
+                    ui.info(f"workspace: {agent.ctx.root}")
+                    continue
+                target = Path(os.path.expanduser(os.path.expandvars(arg1))).resolve()
+                if not target.is_dir():
+                    ui.error(f"not a directory: {target}")
+                    continue
+                agent.ctx.root = target
+                agent._refresh_system_prompt()
+                ui.info(f"workspace → {target}")
                 continue
             if cmd == "diag":
                 ui.info(f"model:    {agent.model}")

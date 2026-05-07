@@ -172,6 +172,20 @@ def t_grep(args: dict, ctx: ToolContext) -> str:
     return _truncate("\n".join(matches) if matches else "(no matches)")
 
 
+def t_set_workspace(args: dict, ctx: ToolContext) -> str:
+    path = args["path"]
+    create = bool(args.get("create", False))
+    p = _resolve(path, ctx.root)
+    if not p.exists():
+        if not create:
+            return f"ERROR: directory does not exist: {p}. Pass create=true to mkdir it."
+        p.mkdir(parents=True, exist_ok=True)
+    elif not p.is_dir():
+        return f"ERROR: not a directory: {p}"
+    ctx.root = p.resolve()
+    return f"OK: workspace set to {ctx.root}"
+
+
 def t_run_bash(args: dict, ctx: ToolContext) -> str:
     cmd = args["command"]
     timeout = int(args.get("timeout", 60))
@@ -205,6 +219,7 @@ TOOLS: dict[str, ToolFn] = {
     "list_dir": t_list_dir,
     "grep": t_grep,
     "run_bash": t_run_bash,
+    "set_workspace": t_set_workspace,
 }
 
 
@@ -282,6 +297,21 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "case_insensitive": {"type": "boolean"},
                 },
                 "required": ["pattern"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_workspace",
+            "description": "Change the workspace directory used to resolve relative paths. Use this immediately after creating a new project folder so subsequent file writes go inside it.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Directory to switch to. Absolute or ~-path recommended."},
+                    "create": {"type": "boolean", "description": "Create the directory if it does not exist. Default false."},
+                },
+                "required": ["path"],
             },
         },
     },
