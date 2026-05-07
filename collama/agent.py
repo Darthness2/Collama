@@ -351,12 +351,68 @@ class Agent:
             self._plan_shown_this_turn = True
         return content
 
-    def _run_text_protocol(self) -> str:
-        """Loop using the <tool>{json}</tool> text protocol — for models without native tool calls."""
-        for _ in range(MAX_TOOL_ITERATIONS):
+    def _extract_calls(self, msg: dict, content: str) -> tuple[list[tuple[str, dict, str]], str]:
+        """Return (calls, narration). Each call is (name, args, result_role).
+
+        result_role is "tool" for native tool_calls (replied to via role=tool)
+        or "user" for salvaged calls (replied to via role=user).
+
+        Native tool_calls take precedence; if none, we scan `content` for any
+        <tool>/DeepSeek/fenced/bare JSON tool call. `narration` is the content
+        with any salvaged-call substring removed (so it won't be re-rendered).
+        """
+        native = msg.get("tool_calls") or []
+        if native:
+            calls: list[tuple[str, dict, str]] = []
+            for c in native:
+                fn = c.get("function", {}) or {}
+                name = fn.get("name", "")
+                raw = fn.get("arguments", {})
+                if isinstance(raw, str):
+                    try:
+                        args = json.loads(raw) if raw else {}
+                    except json.JSONDecodeError:
+                        args = {}
+                else:
+                    args = raw or {}
+                calls.append((name, args, "tool"))
+            return calls, content
+
+        if not content:
+            return [], content
+
+        extracted = _extract_tool_call(content)
+        if not extracted:
+            return [], content
+        name, args, start, end = extracted
+        narration = (content[:start] + content[end:]).strip()
+        return [(name, args, "user")], narration
+
+    def _chat_once(self) -> dict | None:
+        """One round-trip to Ollama. Handles tool-unsupported fallback transparently."""
+        try:
+            with ui.Spinner("thinking"):
+                return self.client.chat(
+                    model=self.model,
+                    messages=self.messages,
+                    tools=all_tool_schemas() if self.tools_enabled else None,
+                    options=self._options(),
+                )
+        except ToolsUnsupportedError:
+            ui.warn(
+                f"model '{self.model}' does not support native tool calls — "
+                "switching to text-protocol tools for this session."
+            )
+            self.tools_enabled = False
+            self._refresh_system_prompt()
+            if self.on_tools_disabled:
+                try:
+                    self.on_tools_disabled(self)
+                except Exception:
+                    pass
             try:
                 with ui.Spinner("thinking"):
-                    msg = self.client.chat(
+                    return self.client.chat(
                         model=self.model,
                         messages=self.messages,
                         tools=None,
@@ -364,59 +420,83 @@ class Agent:
                     )
             except OllamaError as e:
                 ui.error(str(e))
+                return None
+        except OllamaError as e:
+            ui.error(str(e))
+            return None
+
+    def turn(self, user_input: str) -> str:
+        """Core agent loop:
+
+            user → messages → Ollama → response
+                                          │
+                              tool calls present?
+                              ┌──────────┴──────────┐
+                             yes                    no
+                              │                     │
+                       execute tools           render text
+                       append results          and return
+                       loop ────────────► messages
+        """
+        self.messages.append({"role": "user", "content": user_input})
+        self._plan_shown_this_turn = False
+        self._recent_calls = []
+
+        for _ in range(MAX_TOOL_ITERATIONS):
+            msg = self._chat_once()
+            if msg is None:
                 return ""
 
-            raw = (msg.get("content") or "")
-
-            # Strip any fabricated tool *outputs* the model invented. We never
-            # emit these; the model is hallucinating success.
-            had_fake_outputs = _Outputs.search(raw)
+            # Strip fabricated <｜tool▁outputs｜> blocks before storing.
+            raw = msg.get("content") or ""
+            had_fakes = _Outputs.search(raw)
             cleaned = _Outputs.strip(raw).strip()
-
-            # Save the cleaned message (without fakes).
             msg["content"] = cleaned
             self.messages.append(msg)
 
-            cleaned = self._render_meta(cleaned).strip()
-            extracted = _extract_tool_call(cleaned)
+            if had_fakes:
+                ui.warn("model fabricated tool outputs — asking it to retry properly.")
+                self.messages.append({
+                    "role": "user",
+                    "content": (
+                        "STOP. You fabricated tool output blocks; only I emit those. "
+                        "Emit a single tool call (<tool>{...}</tool> or fenced JSON) and STOP. "
+                        "Do NOT write tool_outputs yourself."
+                    ),
+                })
+                continue
 
-            if not extracted:
-                if had_fake_outputs:
-                    ui.warn("model fabricated tool outputs — telling it to retry properly.")
+            # Pull plan/<think> tags out for separate rendering.
+            content = self._render_meta(cleaned).strip()
+
+            # Determine the next action: tool calls, or final text.
+            calls, narration = self._extract_calls(msg, content)
+
+            if not calls:
+                if narration:
+                    ui.assistant(narration)
+                return self._finish(narration)
+
+            if narration:
+                # Inline narration before tool execution.
+                print(ui.color("  ▪ ", ui.TEAL_DIM) + ui.color(narration, ui.MUTED))
+
+            for name, args, role in calls:
+                if self._check_loop(name, args):
+                    continue
+                ui.tool_call(name, self._summarize_args(name, args))
+                result = dispatch(name, args, self.ctx)
+                ok = not result.startswith("ERROR")
+                first_line = result.splitlines()[0] if result else ""
+                ui.tool_result(first_line[:160], ok=ok)
+
+                if role == "tool":
+                    self.messages.append({"role": "tool", "name": name, "content": result})
+                else:
                     self.messages.append({
                         "role": "user",
-                        "content": (
-                            "STOP. You fabricated tool output blocks; that is not allowed. "
-                            "I am the harness — only I can produce tool outputs. "
-                            "If you need to call a tool, emit ONE call and STOP. "
-                            "Acceptable formats:\n"
-                            "  <tool>{\"name\":\"NAME\",\"arguments\":{...}}</tool>\n"
-                            "  …or your native <｜tool▁call▁begin｜>function<｜tool▁sep｜>NAME ```json {...} ```<｜tool▁call▁end｜>\n"
-                            "Then wait for my response. Do NOT write tool_outputs yourself."
-                        ),
+                        "content": f"Tool result for {name}:\n{result}",
                     })
-                    continue
-                if cleaned:
-                    ui.assistant(cleaned)
-                return self._finish(cleaned)
-
-            name, args, start, end = extracted
-            preamble = cleaned[:start].strip()
-            if preamble:
-                ui.assistant(preamble)
-
-            if self._check_loop(name, args):
-                continue
-            ui.tool_call(name, self._summarize_args(name, args))
-            result = dispatch(name, args, self.ctx)
-            ok = not result.startswith("ERROR")
-            first_line = result.splitlines()[0] if result else ""
-            ui.tool_result(first_line[:160], ok=ok)
-
-            self.messages.append({
-                "role": "user",
-                "content": f"Tool result for {name}:\n{result}",
-            })
 
         ui.warn(f"hit tool-call limit ({MAX_TOOL_ITERATIONS}); stopping.")
         return ""
@@ -455,108 +535,3 @@ class Agent:
             return True
         return False
 
-    def turn(self, user_input: str) -> str:
-        """Run one user-turn: send message, loop through tool calls, return final text."""
-        self.messages.append({"role": "user", "content": user_input})
-        self._plan_shown_this_turn = False
-        self._recent_calls = []
-
-        if not self.tools_enabled:
-            return self._run_text_protocol()
-
-        for _ in range(MAX_TOOL_ITERATIONS):
-            try:
-                with ui.Spinner("thinking"):
-                    msg = self.client.chat(
-                        model=self.model,
-                        messages=self.messages,
-                        tools=all_tool_schemas() if self.tools_enabled else None,
-                        options=self._options(),
-                    )
-            except ToolsUnsupportedError:
-                ui.warn(
-                    f"model '{self.model}' does not support native tool calls — "
-                    "switching to text-protocol tools for this session."
-                )
-                self.tools_enabled = False
-                self._refresh_system_prompt()
-                if self.on_tools_disabled:
-                    try:
-                        self.on_tools_disabled(self)
-                    except Exception:
-                        pass
-                return self._run_text_protocol()
-            except OllamaError as e:
-                ui.error(str(e))
-                return ""
-
-            self.messages.append(msg)
-
-            tool_calls = msg.get("tool_calls") or []
-            raw_content = (msg.get("content") or "").strip()
-            content = self._render_meta(raw_content).strip()
-
-            # Some models (qwen, llama variants) emit tool calls as JSON inside
-            # `content` instead of using the native tool_calls field. Salvage
-            # those so the agent doesn't stall with the JSON in the answer panel.
-            if not tool_calls and content:
-                extracted = _extract_tool_call(content)
-                if extracted:
-                    name, args, start, end = extracted
-                    preamble = content[:start].strip()
-                    if preamble:
-                        print(ui.color("  ▪ ", ui.TEAL_DIM) + ui.color(preamble, ui.MUTED))
-                    if self._check_loop(name, args):
-                        continue
-                    ui.tool_call(name, self._summarize_args(name, args))
-                    result = dispatch(name, args, self.ctx)
-                    ok = not result.startswith("ERROR")
-                    first_line = result.splitlines()[0] if result else ""
-                    ui.tool_result(first_line[:160], ok=ok)
-                    # Use a user-role message; "tool" role is only valid in
-                    # response to a native tool_calls entry.
-                    self.messages.append({
-                        "role": "user",
-                        "content": f"Tool result for {name}:\n{result}",
-                    })
-                    continue
-
-            if content and not tool_calls:
-                ui.assistant(content)
-                return self._finish(content)
-
-            if content and tool_calls:
-                # Inline narration between tool calls — render lightly, not as an answer panel.
-                print(ui.color("  ▪ ", ui.TEAL_DIM) + ui.color(content, ui.MUTED))
-
-            if not tool_calls:
-                return self._finish(content)
-
-            for call in tool_calls:
-                fn = call.get("function", {}) or {}
-                name = fn.get("name", "")
-                raw_args = fn.get("arguments", {})
-                if isinstance(raw_args, str):
-                    try:
-                        args = json.loads(raw_args) if raw_args else {}
-                    except json.JSONDecodeError:
-                        args = {}
-                else:
-                    args = raw_args or {}
-
-                if self._check_loop(name, args):
-                    continue
-                ui.tool_call(name, self._summarize_args(name, args))
-                result = dispatch(name, args, self.ctx)
-                ok = not result.startswith("ERROR")
-                first_line = result.splitlines()[0] if result else ""
-                ui.tool_result(first_line[:160], ok=ok)
-
-                self.messages.append({
-                    "role": "tool",
-                    "name": name,
-                    "content": result,
-                })
-
-        ui.warn(f"hit tool-call limit ({MAX_TOOL_ITERATIONS}); stopping.")
-        return ""
