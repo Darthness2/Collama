@@ -11,6 +11,9 @@ from typing import Callable
 SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/help", "show available commands"),
     ("/tools", "list tools the model can call"),
+    ("/tools-on", "force native tool calls for this model"),
+    ("/tools-off", "force text-protocol tool fallback for this model"),
+    ("/diag", "print model / workspace / tools / github status"),
     ("/model", "show or switch model (saved)"),
     ("/models", "list installed Ollama models"),
     ("/host", "show or change Ollama host (saved)"),

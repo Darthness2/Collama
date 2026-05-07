@@ -31,7 +31,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 HELP_TEXT = """\
 Slash commands:
   /help                   show this help
-  /tools                  list tools the model can call
+  /tools                  list tools the model can call (and current mode)
+  /tools-on               force native tool calls for this model (saves)
+  /tools-off              force text-protocol tool fallback for this model (saves)
+  /diag                   print model / workspace / home / tools / github status
   /model [name]           show or switch model
   /models                 list locally installed Ollama models
   /host [url]             show or change the Ollama host
@@ -165,8 +168,31 @@ def repl(agent: Agent, cfg: dict) -> int:
                 continue
             if cmd == "tools":
                 from .tools import _all_tools
+                mode = "native" if agent.tools_enabled else "text-protocol fallback"
+                ui.info(f"mode: {mode}")
                 for n in _all_tools():
                     print(f"  - {n}")
+                continue
+            if cmd == "tools-on":
+                agent.tools_enabled = True
+                agent._refresh_system_prompt()
+                config.set_value(cfg, f"models.{agent.model}.tools_supported", True)
+                config.save(cfg)
+                ui.info(f"native tools force-enabled for '{agent.model}' (saved).")
+                continue
+            if cmd == "tools-off":
+                agent.tools_enabled = False
+                agent._refresh_system_prompt()
+                config.set_value(cfg, f"models.{agent.model}.tools_supported", False)
+                config.save(cfg)
+                ui.info(f"using text-protocol fallback for '{agent.model}' (saved).")
+                continue
+            if cmd == "diag":
+                ui.info(f"model:    {agent.model}")
+                ui.info(f"workspace: {agent.ctx.root}")
+                ui.info(f"home:     {Path.home()}")
+                ui.info(f"tools:    {'native' if agent.tools_enabled else 'text-protocol fallback'}")
+                ui.info(f"github:   {'logged in' if agent.ctx.github_token else 'no token'}")
                 continue
             if cmd == "model":
                 if not arg1:

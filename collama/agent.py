@@ -2,11 +2,42 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
+
+_TOOL_TAG_RX = re.compile(r"<tool>\s*(\{.*?\})\s*</tool>", re.DOTALL)
 
 from . import ui
 from .ollama_client import OllamaClient, OllamaError, ToolsUnsupportedError
 from .tools import ToolContext, all_tool_schemas, dispatch
+
+TEXT_TOOL_PROTOCOL = """
+=== TEXT TOOL PROTOCOL (use this — your runtime does NOT support native tool calls) ===
+You DO have full access to the user's filesystem and shell, but you must invoke tools by emitting a tag.
+
+To call a tool, emit EXACTLY one tag on its own line:
+
+  <tool>{"name":"TOOL_NAME","arguments":{...}}</tool>
+
+Then STOP — produce nothing after the tag. The harness will execute the tool and reply with a message containing the result. Then you continue (call another tool, or write your final answer).
+When the task is complete, just write your final answer as plain text with NO tool tag.
+
+Available tools (same names as native function calling):
+- read_file({"path": str, "start_line"?: int, "end_line"?: int})
+- write_file({"path": str, "content": str})
+- edit_file({"path": str, "old_string": str, "new_string": str, "replace_all"?: bool})
+- list_dir({"path"?: str})
+- grep({"pattern": str, "path"?: str, "case_insensitive"?: bool})
+- run_bash({"command": str, "timeout"?: int})
+- gh_whoami({}), gh_list_repos({...}), gh_get_repo({"repo": str}),
+  gh_get_file({"repo": str, "path": str, "ref"?: str}),
+  gh_list_issues({"repo": str, ...}), gh_create_issue({"repo": str, "title": str, "body"?: str}),
+  gh_list_pulls({"repo": str, ...}), gh_get_pull({"repo": str, "number": int}),
+  gh_search_code({"query": str}), github_api({"method"?: str, "path": str, "body"?: object})
+
+IMPORTANT: You CAN see the user's files. Use read_file / list_dir / grep instead of saying you cannot.
+"""
+
 
 def build_system_prompt(workspace: Path, home: Path, tools_enabled: bool = True) -> str:
     base = f"""You are Collama, a terminal-based coding assistant running on the user's machine via Ollama.
@@ -34,11 +65,7 @@ Operating principles:
 - When the task is complete, give a short final answer and stop calling tools.
 """
     if not tools_enabled:
-        base += (
-            "\nNOTE: This Ollama model does not support tool calling, so file/shell tools "
-            "are DISABLED for this session. You can still discuss code and answer questions, "
-            "but you cannot read or edit files yourself. Ask the user to paste contents when needed."
-        )
+        base += "\n" + TEXT_TOOL_PROTOCOL
     return base
 
 MAX_TOOL_ITERATIONS = 25
@@ -103,9 +130,76 @@ class Agent:
             return " ".join(bits)
         return ""
 
+    def _finish(self, content: str) -> str:
+        if self.on_turn_complete:
+            try:
+                self.on_turn_complete(self)
+            except Exception:
+                pass
+        return content
+
+    def _run_text_protocol(self) -> str:
+        """Loop using the <tool>{json}</tool> text protocol — for models without native tool calls."""
+        for _ in range(MAX_TOOL_ITERATIONS):
+            try:
+                msg = self.client.chat(
+                    model=self.model,
+                    messages=self.messages,
+                    tools=None,
+                    options=self._options(),
+                )
+            except OllamaError as e:
+                ui.error(str(e))
+                return ""
+
+            self.messages.append(msg)
+            content = (msg.get("content") or "").strip()
+            m = _TOOL_TAG_RX.search(content)
+
+            if not m:
+                if content:
+                    ui.assistant(content)
+                return self._finish(content)
+
+            preamble = content[:m.start()].strip()
+            if preamble:
+                ui.assistant(preamble)
+
+            try:
+                call = json.loads(m.group(1))
+                name = call["name"]
+                args = call.get("arguments") or call.get("args") or {}
+                if not isinstance(args, dict):
+                    raise ValueError("arguments must be an object")
+            except (json.JSONDecodeError, KeyError, ValueError) as e:
+                ui.warn(f"could not parse tool tag: {e}")
+                self.messages.append({
+                    "role": "user",
+                    "content": f"Your <tool> tag could not be parsed ({e}). Retry with valid JSON of the form "
+                               "<tool>{\"name\":\"...\",\"arguments\":{...}}</tool>.",
+                })
+                continue
+
+            ui.tool_call(name, self._summarize_args(name, args))
+            result = dispatch(name, args, self.ctx)
+            ok = not result.startswith("ERROR")
+            first_line = result.splitlines()[0] if result else ""
+            ui.tool_result(first_line[:160], ok=ok)
+
+            self.messages.append({
+                "role": "user",
+                "content": f"Tool result for {name}:\n{result}",
+            })
+
+        ui.warn(f"hit tool-call limit ({MAX_TOOL_ITERATIONS}); stopping.")
+        return ""
+
     def turn(self, user_input: str) -> str:
         """Run one user-turn: send message, loop through tool calls, return final text."""
         self.messages.append({"role": "user", "content": user_input})
+
+        if not self.tools_enabled:
+            return self._run_text_protocol()
 
         for _ in range(MAX_TOOL_ITERATIONS):
             try:
@@ -117,8 +211,8 @@ class Agent:
                 )
             except ToolsUnsupportedError:
                 ui.warn(
-                    f"model '{self.model}' does not support tool calls — "
-                    "disabling file/shell tools for this session."
+                    f"model '{self.model}' does not support native tool calls — "
+                    "switching to text-protocol tools for this session."
                 )
                 self.tools_enabled = False
                 self._refresh_system_prompt()
@@ -127,7 +221,7 @@ class Agent:
                         self.on_tools_disabled(self)
                     except Exception:
                         pass
-                continue
+                return self._run_text_protocol()
             except OllamaError as e:
                 ui.error(str(e))
                 return ""

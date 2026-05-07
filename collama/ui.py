@@ -112,7 +112,7 @@ def banner(model: str, cwd: str, tools_enabled: bool = True) -> None:
         print(color(line, TEAL_BRIGHT))
     print()
 
-    badge = "tools: on" if tools_enabled else "tools: OFF (model lacks support)"
+    badge = "tools: native" if tools_enabled else "tools: text-protocol fallback"
     badge_c = OK if tools_enabled else WARN
 
     rows = [
