@@ -135,7 +135,7 @@ def _resolve_session_arg(arg: str, listed: list[dict]) -> dict | None:
 
 
 def repl(agent: Agent, cfg: dict) -> int:
-    ui.banner(agent.model, str(agent.ctx.root))
+    ui.banner(agent.model, str(agent.ctx.root), tools_enabled=agent.tools_enabled)
 
     # Active session (auto-created, auto-saved after each turn)
     session = sessions.make(agent.model)
@@ -145,7 +145,7 @@ def repl(agent: Agent, cfg: dict) -> int:
     prompt = Prompt()
     while True:
         try:
-            line = prompt.ask(ui.color("\n› ", ui.BOLD)).strip()
+            line = prompt.ask(ui.color("\n❯ ", ui.TEAL_BRIGHT)).strip()
         except (EOFError, KeyboardInterrupt):
             print()
             return 0
@@ -175,7 +175,16 @@ def repl(agent: Agent, cfg: dict) -> int:
                     agent.model = arg1
                     cfg["model"] = arg1
                     config.save(cfg)
-                    ui.info(f"switched to {arg1} (saved)")
+                    # Re-evaluate tool support for the new model.
+                    supported = config.get_value(cfg, f"models.{arg1}.tools_supported", True)
+                    agent.tools_enabled = bool(supported)
+                    agent._refresh_system_prompt()
+                    agent.on_tools_disabled = lambda _a: (
+                        config.set_value(cfg, f"models.{arg1}.tools_supported", False)
+                        or config.save(cfg)
+                    )
+                    note = "" if supported else " (no tool support — tool-less)"
+                    ui.info(f"switched to {arg1}{note} (saved)")
                 continue
             if cmd == "models":
                 try:
@@ -365,12 +374,24 @@ def main(argv: list[str] | None = None) -> int:
     temperature = args.temperature if args.temperature is not None else float(cfg.get("temperature", 0.2))
     yolo = args.yolo or bool(cfg.get("yolo", False))
 
+    # Per-model tool-support memory: if we've already learned a model can't
+    # do tools (e.g. deepseek-coder), start with tools off rather than probe.
+    tools_supported = config.get_value(cfg, f"models.{model}.tools_supported", True)
+    if tools_supported is False:
+        ui.warn(f"note: '{model}' is known not to support tool calls — running tool-less.")
+
+    def _remember_no_tools(_a):
+        config.set_value(cfg, f"models.{model}.tools_supported", False)
+        config.save(cfg)
+
     agent = Agent(
         client=client,
         model=model,
         root=root,
         yolo=yolo,
         temperature=temperature,
+        tools_enabled=bool(tools_supported),
+        on_tools_disabled=_remember_no_tools,
     )
     agent.ctx.github_token = config.get_value(cfg, "github.token")
 

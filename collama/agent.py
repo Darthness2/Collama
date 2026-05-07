@@ -5,25 +5,41 @@ import json
 from pathlib import Path
 
 from . import ui
-from .ollama_client import OllamaClient, OllamaError
+from .ollama_client import OllamaClient, OllamaError, ToolsUnsupportedError
 from .tools import ToolContext, all_tool_schemas, dispatch
 
-SYSTEM_PROMPT = """You are Collama, a terminal-based coding assistant running on the user's machine via Ollama.
+def build_system_prompt(workspace: Path, home: Path, tools_enabled: bool = True) -> str:
+    base = f"""You are Collama, a terminal-based coding assistant running on the user's machine via Ollama.
 
-You help the user read, edit, and create files, run commands, query GitHub, and answer questions about their codebase. You have tools available — use them. Don't ask the user to paste file contents; read files yourself with read_file. Don't guess at code; verify with grep / read_file first.
+You help the user read, edit, and create files, run commands, query GitHub, and answer questions about their codebase.
+
+Environment:
+- Workspace (cwd): {workspace}
+- User home dir:  {home}
+- OS user can reach files anywhere on the filesystem.
 
 Filesystem access:
-- You have access to the entire filesystem the user can reach. Relative paths resolve against the workspace root; absolute paths (e.g. /etc/hosts, /Users/me/notes.md) and ~-paths (e.g. ~/Downloads) work too.
-- Be careful with destructive tools. Always confirm intent before deleting or overwriting outside the workspace.
+- Your file/dir/grep/bash tools accept relative paths (resolved against the workspace), absolute paths (e.g. /etc/hosts), and ~-paths (e.g. ~/Documents). The home dir above is what ~ expands to.
+- You can — and should — read and edit files OUTSIDE the workspace when the user asks. The workspace is just the default for relative paths; it is NOT a sandbox.
+- When the user starts a NEW project, create a new top-level directory under the home dir (e.g. {home}/<project-name>/) and put all the project files inside it. Don't nest a new project inside the current workspace unless the user explicitly asks.
+- Be careful with destructive operations. Always confirm intent before deleting or overwriting outside the workspace.
 
 Operating principles:
 - Be concise. The user is in a terminal; long answers are noise.
+- Don't ask the user to paste file contents — read files yourself with read_file.
+- Don't guess at code — verify with grep / read_file first.
 - Prefer edit_file over write_file for existing files (safer — exact replacement, and the user sees a diff).
 - When making changes, briefly confirm what you did and any follow-ups the user should run (tests, lints).
-- Never invent file paths. Use list_dir / grep to discover them.
 - One step at a time: call a tool, see the result, then decide.
 - When the task is complete, give a short final answer and stop calling tools.
 """
+    if not tools_enabled:
+        base += (
+            "\nNOTE: This Ollama model does not support tool calling, so file/shell tools "
+            "are DISABLED for this session. You can still discuss code and answer questions, "
+            "but you cannot read or edit files yourself. Ask the user to paste contents when needed."
+        )
+    return base
 
 MAX_TOOL_ITERATIONS = 25
 
@@ -37,20 +53,33 @@ class Agent:
         yolo: bool = False,
         temperature: float = 0.2,
         on_turn_complete=None,
+        tools_enabled: bool = True,
+        on_tools_disabled=None,
     ):
         self.client = client
         self.model = model
         self.ctx = ToolContext(root=root, yolo=yolo)
         self.temperature = temperature
-        self.messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self.tools_enabled = tools_enabled
         self.on_turn_complete = on_turn_complete  # called after each user turn
+        self.on_tools_disabled = on_tools_disabled  # called the first time tool support fails
+        self.messages: list[dict] = [{"role": "system", "content": self._system_prompt()}]
+
+    def _system_prompt(self) -> str:
+        return build_system_prompt(self.ctx.root, Path.home(), tools_enabled=self.tools_enabled)
+
+    def _refresh_system_prompt(self) -> None:
+        if self.messages and self.messages[0].get("role") == "system":
+            self.messages[0]["content"] = self._system_prompt()
+        else:
+            self.messages.insert(0, {"role": "system", "content": self._system_prompt()})
 
     def reset(self) -> None:
-        self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self.messages = [{"role": "system", "content": self._system_prompt()}]
 
     def load_messages(self, messages: list[dict]) -> None:
         if not messages or messages[0].get("role") != "system":
-            messages = [{"role": "system", "content": SYSTEM_PROMPT}] + list(messages)
+            messages = [{"role": "system", "content": self._system_prompt()}] + list(messages)
         self.messages = list(messages)
 
     def _options(self) -> dict:
@@ -83,9 +112,22 @@ class Agent:
                 msg = self.client.chat(
                     model=self.model,
                     messages=self.messages,
-                    tools=all_tool_schemas(),
+                    tools=all_tool_schemas() if self.tools_enabled else None,
                     options=self._options(),
                 )
+            except ToolsUnsupportedError:
+                ui.warn(
+                    f"model '{self.model}' does not support tool calls — "
+                    "disabling file/shell tools for this session."
+                )
+                self.tools_enabled = False
+                self._refresh_system_prompt()
+                if self.on_tools_disabled:
+                    try:
+                        self.on_tools_disabled(self)
+                    except Exception:
+                        pass
+                continue
             except OllamaError as e:
                 ui.error(str(e))
                 return ""

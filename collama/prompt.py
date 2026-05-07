@@ -38,6 +38,7 @@ def _build_pt_session():
         from prompt_toolkit.completion import Completer, Completion
         from prompt_toolkit.history import FileHistory
         from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+        from prompt_toolkit.styles import Style
     except ImportError:
         return None
 
@@ -46,10 +47,8 @@ def _build_pt_session():
     class SlashCompleter(Completer):
         def get_completions(self, document, complete_event):
             text = document.text_before_cursor
-            # Only complete when the line starts with '/'
             if not text.startswith("/"):
                 return
-            # Don't keep showing the popup once the user has moved past the command word.
             if " " in text:
                 return
             for name, hint in SLASH_COMMANDS:
@@ -64,11 +63,23 @@ def _build_pt_session():
     history_path = config_dir() / "history"
     history_path.parent.mkdir(parents=True, exist_ok=True)
 
+    style = Style.from_dict({
+        "completion-menu":               "bg:#0b3b3a #b8e6e1",
+        "completion-menu.completion":    "bg:#0b3b3a #b8e6e1",
+        "completion-menu.completion.current": "bg:#1abc9c #002b2b bold",
+        "completion-menu.meta":          "bg:#0b3b3a #5fbfb5",
+        "completion-menu.meta.current":  "bg:#1abc9c #002b2b",
+        "auto-suggestion":               "#3a6e6a italic",
+        "scrollbar.background":          "bg:#0b3b3a",
+        "scrollbar.button":              "bg:#1abc9c",
+    })
+
     return PromptSession(
         completer=SlashCompleter(),
         complete_while_typing=True,
         auto_suggest=AutoSuggestFromHistory(),
         history=FileHistory(str(history_path)),
+        style=style,
     )
 
 

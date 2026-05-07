@@ -7,8 +7,20 @@ from typing import Any, Iterator
 import requests
 
 
+def _looks_like_tools_error(body: str) -> bool:
+    b = body.lower()
+    return (
+        "does not support tools" in b
+        or "tool" in b and ("not support" in b or "unsupported" in b or "no tool" in b)
+    )
+
+
 class OllamaError(RuntimeError):
     pass
+
+
+class ToolsUnsupportedError(OllamaError):
+    """Raised when the chosen model rejects tool calls (e.g. deepseek-coder)."""
 
 
 class OllamaClient:
@@ -50,7 +62,10 @@ class OllamaClient:
         except requests.RequestException as e:
             raise OllamaError(f"chat request failed: {e}") from e
         if r.status_code != 200:
-            raise OllamaError(f"chat HTTP {r.status_code}: {r.text[:500]}")
+            body = r.text[:500]
+            if r.status_code == 400 and tools and _looks_like_tools_error(body):
+                raise ToolsUnsupportedError(body)
+            raise OllamaError(f"chat HTTP {r.status_code}: {body}")
         try:
             data = r.json()
         except json.JSONDecodeError as e:
