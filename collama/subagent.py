@@ -22,8 +22,14 @@ def fork_subagent(
     *,
     model: str | None = None,
     title: str = "subagent",
+    role: str | None = None,
 ) -> str:
-    """Run a sub-agent and return its final answer."""
+    """Run a sub-agent and return its final answer.
+
+    `role` (optional) is appended to the system prompt — used by the team
+    coordinator to give each teammate a persistent persona without
+    rewriting the engine's system-prompt builder.
+    """
     from .engine import QueryEngine  # local import — avoids circular at module load
 
     sub_state = AppState(
@@ -44,6 +50,9 @@ def fork_subagent(
         permission_resolver=parent.permission_resolver,
         stream=False,
     )
+
+    if role and sub.messages and sub.messages[0].get("role") == "system":
+        sub.messages[0]["content"] = sub.messages[0]["content"] + "\n\n=== ROLE ===\n" + role
 
     final = ""
     for ev in sub.submit_message(prompt):

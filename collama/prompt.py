@@ -17,6 +17,8 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/tasks", "list persistent tasks"),
     ("/jobs", "list background jobs"),
     ("/wt", "show worktree stack"),
+    ("/teams", "list teams and teammates"),
+    ("/tick", "coordinator tick — process mailboxes"),
     ("/insecure", "toggle SSL verification (school/corp MITM proxies)"),
     ("/diag", "print model / workspace / tools / github status"),
     ("/model", "show or switch model (saved)"),

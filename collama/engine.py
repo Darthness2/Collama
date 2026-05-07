@@ -61,6 +61,7 @@ from .services.compact import (
 from .services.transcript import record as record_transcript
 from .state import AppState
 from .tasks import TaskGraph, TaskKind, new_id
+from .teams import TeamRegistry
 from .tools import ToolContext, all_tool_schemas, dispatch
 
 
@@ -346,6 +347,7 @@ class StreamingToolExecutor:
         engine: object | None = None,
         background: object | None = None,
         tasks: object | None = None,
+        teams: object | None = None,
     ) -> None:
         self.state = state
         self.resolver = resolver
@@ -353,6 +355,7 @@ class StreamingToolExecutor:
         self.engine = engine
         self.background = background
         self.tasks = tasks
+        self.teams = teams
 
     def execute(self, calls: list[tuple[str, dict, str]]) -> Iterator[Message]:
         if not calls:
@@ -398,6 +401,7 @@ class StreamingToolExecutor:
             engine=self.engine,
             background=self.background,
             tasks=self.tasks,
+            teams=self.teams,
         )
         try:
             result = dispatch(name, args, ctx)
@@ -439,9 +443,11 @@ class QueryEngine:
         self.permission_resolver: Resolver = permission_resolver or auto_deny_resolver
         self.task_graph = TaskGraph()
         self.background = BackgroundExecutor(tasks=self.task_graph)
+        self.teams = TeamRegistry()
         self.executor = StreamingToolExecutor(
             state, self.permission_resolver,
-            engine=self, background=self.background, tasks=self.task_graph,
+            engine=self, background=self.background,
+            tasks=self.task_graph, teams=self.teams,
         )
         self.messages: list[dict] = [{"role": "system", "content": fetch_system_prompt_parts(state)}]
         self._recent_calls: list[tuple[str, str]] = []

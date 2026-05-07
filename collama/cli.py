@@ -38,6 +38,8 @@ Slash commands:
   /tasks                  list persistent tasks (s07)
   /jobs                   list background jobs (s08)
   /wt                     show worktree stack (s12)
+  /teams                  list teams and teammates (s09)
+  /tick [team] [claim]    coordinator tick — process mailboxes; pass 'claim' to auto-claim tasks (s11)
   /insecure on|off        toggle SSL verification for HTTPS calls (school/corp MITM proxies)
   /diag                   print model / workspace / home / tools / github status
   /model [name]           show or switch model
@@ -228,6 +230,33 @@ def repl(agent: Agent, cfg: dict) -> int:
                 stack = list(agent.state.worktree_stack or [])
                 ui.info(f"workspace: {agent.state.workspace}")
                 ui.info(f"worktree stack ({len(stack)}): " + (", ".join(stack) if stack else "(empty)"))
+                continue
+            if cmd == "teams":
+                reg = agent.engine.teams
+                teams = reg.list_teams()
+                if not teams:
+                    ui.info("(no teams)")
+                else:
+                    for t in teams:
+                        members = reg.list_teammates(t)
+                        ui.info(f"{t}  ({len(members)})")
+                        for m in members:
+                            print(f"    - {m.short()}")
+                continue
+            if cmd == "tick":
+                from .coordinator import tick as _tick
+                results = _tick(
+                    agent.engine,
+                    team=arg1 or None,
+                    auto_claim=(arg2.lower() == "claim") if arg2 else False,
+                )
+                if not results:
+                    ui.info("(idle — no teammate had work)")
+                for r in results:
+                    ui.info(f"  → {r.teammate}  inbox={r.inbox_count}  claimed={r.claimed_task_id}")
+                    first = r.answer.splitlines()[0][:120] if r.answer else ""
+                    if first:
+                        print(ui.color(f"      {first}", ui.MUTED))
                 continue
             if cmd == "diag":
                 ui.info(f"model:    {agent.model}")
