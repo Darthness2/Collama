@@ -228,6 +228,7 @@ Environment:
 Filesystem access:
 - Your file/dir/grep/bash tools accept relative paths (resolved against the workspace), absolute paths (e.g. /etc/hosts), and ~-paths (e.g. ~/Documents). The home dir above is what ~ expands to.
 - You can — and should — read and edit files OUTSIDE the workspace when the user asks. The workspace is just the default for relative paths; it is NOT a sandbox.
+- IMPORTANT — local first, GitHub second: when the user mentions a project, repo, or directory name (e.g. "use meteteoman/Market", "in my snake project"), it is almost certainly a LOCAL clone or directory on this machine, NOT a remote GitHub repo. ALWAYS check locally first with list_dir on {home}/<name>, list_dir on the workspace, and grep across the home dir. Only call gh_* tools when the user explicitly says "on GitHub" or asks you to create/list/comment on issues, PRs, or remote repos.
 - When the user starts a NEW project, follow this recipe EXACTLY:
     1. Pick a project dir under the home dir, e.g. {home}/<project-name>/
     2. Call set_workspace with that path and create=true.
@@ -330,16 +331,19 @@ class Agent:
         return content
 
     def _render_meta(self, content: str) -> str:
-        """Pull plan/thinking blocks out, render them, return remaining text."""
+        """Pull plan/thinking blocks out, render them, return remaining text.
+
+        Plan/think tags are ALWAYS stripped (so downstream tool-call parsing
+        sees clean text); plan rendering only happens once per turn.
+        """
         thinks, content = _extract_thinking(content)
         for t in thinks:
             if t:
                 ui.thinking(t)
-        if not getattr(self, "_plan_shown_this_turn", False):
-            steps, content = _extract_plan(content)
-            if steps:
-                ui.plan(steps)
-                self._plan_shown_this_turn = True
+        steps, content = _extract_plan(content)
+        if steps and not getattr(self, "_plan_shown_this_turn", False):
+            ui.plan(steps)
+            self._plan_shown_this_turn = True
         return content
 
     def _run_text_protocol(self) -> str:

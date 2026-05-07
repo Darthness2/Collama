@@ -36,6 +36,7 @@ class ToolContext:
     root: Path
     yolo: bool = False
     github_token: str | None = None
+    insecure_ssl: bool = False
 
     def confirm(self, action: str, detail: str) -> bool:
         if self.yolo:

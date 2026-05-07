@@ -35,6 +35,7 @@ Slash commands:
   /tools-on               force native tool calls for this model (saves)
   /tools-off              force text-protocol tool fallback for this model (saves)
   /cd [path]              show or change the workspace directory
+  /insecure on|off        toggle SSL verification for HTTPS calls (school/corp MITM proxies)
   /diag                   print model / workspace / home / tools / github status
   /model [name]           show or switch model
   /models                 list locally installed Ollama models
@@ -102,6 +103,7 @@ def _redact(cfg: dict) -> dict:
 def _apply_to_agent(agent: Agent, cfg: dict) -> None:
     agent.ctx.github_token = config.get_value(cfg, "github.token")
     agent.ctx.yolo = bool(cfg.get("yolo", agent.ctx.yolo))
+    agent.ctx.insecure_ssl = bool(config.get_value(cfg, "insecure_ssl", False))
 
 
 def _autosave(session: dict, agent: Agent) -> None:
@@ -207,6 +209,21 @@ def repl(agent: Agent, cfg: dict) -> int:
                 ui.info(f"home:     {Path.home()}")
                 ui.info(f"tools:    {'native' if agent.tools_enabled else 'text-protocol fallback'}")
                 ui.info(f"github:   {'logged in' if agent.ctx.github_token else 'no token'}")
+                ui.info(f"ssl:      {'INSECURE (verification off)' if agent.ctx.insecure_ssl else 'verify enabled'}")
+                continue
+            if cmd == "insecure":
+                want = arg1.lower() if arg1 else ("off" if agent.ctx.insecure_ssl else "on")
+                if want not in ("on", "off"):
+                    ui.warn("usage: /insecure on|off")
+                    continue
+                agent.ctx.insecure_ssl = (want == "on")
+                config.set_value(cfg, "insecure_ssl", agent.ctx.insecure_ssl)
+                config.save(cfg)
+                if agent.ctx.insecure_ssl:
+                    ui.warn("SSL verification DISABLED for outbound HTTPS (e.g. GitHub).")
+                    ui.warn("Use only on networks that intercept TLS (school/corp proxies).")
+                else:
+                    ui.info("SSL verification re-enabled.")
                 continue
             if cmd == "model":
                 if not arg1:
@@ -434,6 +451,7 @@ def main(argv: list[str] | None = None) -> int:
         on_tools_disabled=_remember_no_tools,
     )
     agent.ctx.github_token = config.get_value(cfg, "github.token")
+    agent.ctx.insecure_ssl = bool(config.get_value(cfg, "insecure_ssl", False))
 
     if args.prompt:
         agent.turn(args.prompt)

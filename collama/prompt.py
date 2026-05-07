@@ -14,6 +14,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/tools-on", "force native tool calls for this model"),
     ("/tools-off", "force text-protocol tool fallback for this model"),
     ("/cd", "show or change the workspace directory"),
+    ("/insecure", "toggle SSL verification (school/corp MITM proxies)"),
     ("/diag", "print model / workspace / tools / github status"),
     ("/model", "show or switch model (saved)"),
     ("/models", "list installed Ollama models"),

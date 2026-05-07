@@ -14,6 +14,12 @@ import requests
 
 from .tools import ToolContext, _truncate
 
+try:
+    from urllib3.exceptions import InsecureRequestWarning  # type: ignore
+    requests.packages.urllib3.disable_warnings(InsecureRequestWarning)  # type: ignore
+except Exception:
+    pass
+
 API = "https://api.github.com"
 UA = "collama/0.1"
 
@@ -44,6 +50,8 @@ def _need_token(ctx: ToolContext) -> str | None:
 
 def _request(method: str, path: str, ctx: ToolContext, **kw) -> tuple[int, Any]:
     url = path if path.startswith("http") else f"{API}{path}"
+    if ctx.insecure_ssl:
+        kw.setdefault("verify", False)
     try:
         r = requests.request(method, url, headers=_headers(ctx), timeout=30, **kw)
     except requests.RequestException as e:
