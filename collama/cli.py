@@ -148,6 +148,7 @@ def repl(agent: Agent, cfg: dict) -> int:
 
     prompt = Prompt()
     while True:
+        ui.prepare_for_input()
         try:
             line = prompt.ask(ui.color("\n❯ ", ui.TEAL_BRIGHT)).strip()
         except (EOFError, KeyboardInterrupt):

@@ -142,6 +142,25 @@ def hr(char: str = "─", c: str = TEAL_DIM) -> None:
 
 _SPIN_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
+# Track any live spinner so we can force-stop it before reading user input.
+_active_spinners: list["Spinner"] = []
+
+
+def stop_all_spinners() -> None:
+    for s in list(_active_spinners):
+        try:
+            s.stop()
+        except Exception:
+            pass
+
+
+def prepare_for_input() -> None:
+    """Call right before reading user input: stop spinners, show cursor, flush."""
+    stop_all_spinners()
+    if sys.stdout.isatty():
+        sys.stdout.write("\033[?25h")  # show cursor
+        sys.stdout.flush()
+
 
 class Spinner:
     """Tiny non-blocking status spinner. Use as a context manager.
@@ -167,6 +186,7 @@ class Spinner:
         self._t0 = time.monotonic()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
+        _active_spinners.append(self)
 
     def stop(self) -> None:
         if self._thread is None:
@@ -174,6 +194,8 @@ class Spinner:
         self._stop.set()
         self._thread.join()
         self._thread = None
+        if self in _active_spinners:
+            _active_spinners.remove(self)
         # Clear the spinner line.
         sys.stdout.write("\r\033[2K")
         sys.stdout.flush()
