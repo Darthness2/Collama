@@ -7,6 +7,75 @@ from pathlib import Path
 
 _TOOL_TAG_RX = re.compile(r"<tool>\s*(\{.*?\})\s*</tool>", re.DOTALL)
 
+# DeepSeek-Coder native tool-call format (uses unicode-bar special tokens).
+# Example:
+#   <｜tool▁call▁begin｜>function<｜tool▁sep｜>write_file
+#   ```json
+#   {"path": "main.py", "content": "..."}
+#   ```
+#   <｜tool▁call▁end｜>
+# Outer bracket char: ｜ (U+FF5C) or plain |. Inner word-separator: ▁ (U+2581).
+_DS_BAR = r"[｜|]"
+_DEEPSEEK_CALL_RX = re.compile(
+    rf"<{_DS_BAR}tool▁call▁begin{_DS_BAR}>"
+    rf"\s*(?:function\s*<{_DS_BAR}tool▁sep{_DS_BAR}>\s*)?"
+    rf"([A-Za-z_][\w-]*)"
+    rf".*?```(?:json)?\s*(\{{.*?\}})\s*```"
+    rf".*?<{_DS_BAR}tool▁call▁end{_DS_BAR}>",
+    re.DOTALL,
+)
+
+# Hallucinated tool *outputs* — we never emit these; strip and reprimand.
+# Stripped in two passes: nuke wrapped <begin>...<end> blocks first (greedy
+# enough to span fake content), then any stray begin/end tokens that remain.
+_DEEPSEEK_OUTPUTS_BLOCK_RX = re.compile(
+    rf"<{_DS_BAR}tool▁outputs?▁begin{_DS_BAR}>.*?<{_DS_BAR}tool▁outputs?▁end{_DS_BAR}>",
+    re.DOTALL,
+)
+_DEEPSEEK_STRAY_TOKEN_RX = re.compile(
+    rf"<{_DS_BAR}tool▁outputs?▁(?:begin|end){_DS_BAR}>"
+)
+
+
+class _Outputs:
+    @staticmethod
+    def search(text: str) -> bool:
+        return bool(_DEEPSEEK_OUTPUTS_BLOCK_RX.search(text) or _DEEPSEEK_STRAY_TOKEN_RX.search(text))
+
+    @staticmethod
+    def strip(text: str) -> str:
+        text = _DEEPSEEK_OUTPUTS_BLOCK_RX.sub("", text)
+        text = _DEEPSEEK_STRAY_TOKEN_RX.sub("", text)
+        return text
+
+
+_DEEPSEEK_OUTPUTS_RX = _Outputs  # back-compat alias used elsewhere
+
+
+def _extract_tool_call(content: str):
+    """Return (name, args_dict, span_start, span_end) or None."""
+    m = _TOOL_TAG_RX.search(content)
+    if m:
+        try:
+            payload = json.loads(m.group(1))
+            name = payload["name"]
+            args = payload.get("arguments") or payload.get("args") or {}
+            if not isinstance(args, dict):
+                return None
+            return name, args, m.start(), m.end()
+        except (json.JSONDecodeError, KeyError, TypeError):
+            return None
+    m = _DEEPSEEK_CALL_RX.search(content)
+    if m:
+        try:
+            args = json.loads(m.group(2))
+            if not isinstance(args, dict):
+                return None
+            return m.group(1), args, m.start(), m.end()
+        except json.JSONDecodeError:
+            return None
+    return None
+
 from . import ui
 from .ollama_client import OllamaClient, OllamaError, ToolsUnsupportedError
 from .tools import ToolContext, all_tool_schemas, dispatch
@@ -15,12 +84,22 @@ TEXT_TOOL_PROTOCOL = """
 === TEXT TOOL PROTOCOL (use this — your runtime does NOT support native tool calls) ===
 You DO have full access to the user's filesystem and shell, but you must invoke tools by emitting a tag.
 
-To call a tool, emit EXACTLY one tag on its own line:
+To call a tool, emit EXACTLY one tag and STOP. Use either of these formats:
 
-  <tool>{"name":"TOOL_NAME","arguments":{...}}</tool>
+  Format A (preferred):
+    <tool>{"name":"TOOL_NAME","arguments":{...}}</tool>
 
-Then STOP — produce nothing after the tag. The harness will execute the tool and reply with a message containing the result. Then you continue (call another tool, or write your final answer).
-When the task is complete, just write your final answer as plain text with NO tool tag.
+  Format B (DeepSeek native, also accepted):
+    <｜tool▁call▁begin｜>function<｜tool▁sep｜>TOOL_NAME
+    ```json
+    {...arguments...}
+    ```
+    <｜tool▁call▁end｜>
+
+After the tag, STOP. I — the harness — will run the tool and reply with the actual result. You then continue (call another tool, or write your final answer).
+When the task is complete, write your final answer as plain text with NO tool tag.
+
+CRITICAL — DO NOT FAKE TOOL OUTPUTS. Never produce <｜tool▁output▁…｜> or <｜tool▁outputs▁…｜> blocks; those are MINE to emit, not yours. If you write fake outputs, your changes did NOT actually happen and the user will see no files. Just emit the call tag and wait.
 
 Available tools (same names as native function calling):
 - read_file({"path": str, "start_line"?: int, "end_line"?: int})
@@ -157,33 +236,43 @@ class Agent:
                 ui.error(str(e))
                 return ""
 
+            raw = (msg.get("content") or "")
+
+            # Strip any fabricated tool *outputs* the model invented. We never
+            # emit these; the model is hallucinating success.
+            had_fake_outputs = _Outputs.search(raw)
+            cleaned = _Outputs.strip(raw).strip()
+
+            # Save the cleaned message, not the fabricated one.
+            msg["content"] = cleaned
             self.messages.append(msg)
-            content = (msg.get("content") or "").strip()
-            m = _TOOL_TAG_RX.search(content)
 
-            if not m:
-                if content:
-                    ui.assistant(content)
-                return self._finish(content)
+            extracted = _extract_tool_call(cleaned)
 
-            preamble = content[:m.start()].strip()
+            if not extracted:
+                if had_fake_outputs:
+                    ui.warn("model fabricated tool outputs — telling it to retry properly.")
+                    self.messages.append({
+                        "role": "user",
+                        "content": (
+                            "STOP. You fabricated tool output blocks; that is not allowed. "
+                            "I am the harness — only I can produce tool outputs. "
+                            "If you need to call a tool, emit ONE call and STOP. "
+                            "Acceptable formats:\n"
+                            "  <tool>{\"name\":\"NAME\",\"arguments\":{...}}</tool>\n"
+                            "  …or your native <｜tool▁call▁begin｜>function<｜tool▁sep｜>NAME ```json {...} ```<｜tool▁call▁end｜>\n"
+                            "Then wait for my response. Do NOT write tool_outputs yourself."
+                        ),
+                    })
+                    continue
+                if cleaned:
+                    ui.assistant(cleaned)
+                return self._finish(cleaned)
+
+            name, args, start, end = extracted
+            preamble = cleaned[:start].strip()
             if preamble:
                 ui.assistant(preamble)
-
-            try:
-                call = json.loads(m.group(1))
-                name = call["name"]
-                args = call.get("arguments") or call.get("args") or {}
-                if not isinstance(args, dict):
-                    raise ValueError("arguments must be an object")
-            except (json.JSONDecodeError, KeyError, ValueError) as e:
-                ui.warn(f"could not parse tool tag: {e}")
-                self.messages.append({
-                    "role": "user",
-                    "content": f"Your <tool> tag could not be parsed ({e}). Retry with valid JSON of the form "
-                               "<tool>{\"name\":\"...\",\"arguments\":{...}}</tool>.",
-                })
-                continue
 
             ui.tool_call(name, self._summarize_args(name, args))
             result = dispatch(name, args, self.ctx)
