@@ -2,11 +2,42 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
 import textwrap
 import threading
 import time
+
+
+# ----- Windows ANSI passthrough --------------------------------------------
+# Older Windows shells don't process ANSI escape sequences by default; the
+# escapes leak as raw text (`^[[38;5;49m`). Enable Virtual Terminal Processing
+# on stdout/stderr so our color/cursor codes work in cmd.exe / PowerShell /
+# Windows Terminal without needing colorama.
+
+def _enable_windows_ansi() -> None:
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+        for handle_id in (-11, -12):  # STD_OUTPUT_HANDLE, STD_ERROR_HANDLE
+            handle = kernel32.GetStdHandle(handle_id)
+            if not handle or handle == ctypes.c_void_p(-1).value:
+                continue
+            mode = ctypes.c_ulong()
+            if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                kernel32.SetConsoleMode(
+                    handle, mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+                )
+    except Exception:
+        pass
+
+
+_enable_windows_ansi()
+
 
 # ANSI base
 RESET = "\033[0m"
@@ -85,6 +116,113 @@ def _pad(s: str, w: int) -> str:
     return s + " " * max(0, w - _vlen(s))
 
 
+# ---------- markdown rendering ----------
+
+_MD_FENCE_RX = re.compile(r"```([A-Za-z0-9_+\-]*)\n(.*?)```", re.DOTALL)
+_MD_INLINE_CODE_RX = re.compile(r"`([^`\n]+)`")
+_MD_BOLD_RX = re.compile(r"\*\*([^*\n]+)\*\*")
+_MD_ITALIC_AST_RX = re.compile(r"(?<![*\w])\*([^*\n]+?)\*(?!\w)")
+_MD_ITALIC_UND_RX = re.compile(r"(?<!\w)_([^_\n]+?)_(?!\w)")
+_MD_HEADER_RX = re.compile(r"^(#{1,6})\s+(.*)$", re.MULTILINE)
+_MD_BULLET_RX = re.compile(r"^(\s*)[-*]\s+", re.MULTILINE)
+_MD_LINK_RX = re.compile(r"\[([^\]\n]+)\]\(([^)\s]+)\)")
+
+
+def render_markdown(text: str) -> str:
+    """Convert a small subset of CommonMark to ANSI-styled text.
+
+    Handles fenced code blocks, inline code, **bold**, *italic*/_italic_,
+    headers (#), bullets, and inline links. Anything fancier passes through
+    as plain text.
+    """
+    if not _supports_color():
+        return text
+
+    # Fenced code blocks first — pull them out and replace with placeholders
+    # so we don't rewrite their interior with bold/italic rules.
+    placeholders: list[str] = []
+
+    def _stash_block(m: re.Match) -> str:
+        body = m.group(2)
+        rendered_lines = []
+        for line in body.splitlines():
+            rendered_lines.append(color("  │ ", TEAL_DIM) + color(line, TEAL_BRIGHT))
+        rendered = "\n".join(rendered_lines)
+        placeholders.append(rendered)
+        return f"\x00BLOCK{len(placeholders) - 1}\x00"
+
+    out = _MD_FENCE_RX.sub(_stash_block, text)
+
+    def _stash_inline(m: re.Match) -> str:
+        rendered = color(m.group(1), TEAL_BRIGHT + BOLD)
+        placeholders.append(rendered)
+        return f"\x00INL{len(placeholders) - 1}\x00"
+
+    out = _MD_INLINE_CODE_RX.sub(_stash_inline, out)
+
+    # Headers (one per line).
+    def _header(m: re.Match) -> str:
+        level = len(m.group(1))
+        body = m.group(2)
+        if level == 1:
+            return color("━━ " + body + " ━━", TEAL_BRIGHT + BOLD)
+        if level == 2:
+            return color("●  " + body, TEAL + BOLD)
+        return color("·  " + body, TEAL_DIM + BOLD)
+
+    out = _MD_HEADER_RX.sub(_header, out)
+
+    # Bullets.
+    out = _MD_BULLET_RX.sub(lambda m: m.group(1) + color("• ", TEAL), out)
+
+    # Bold and italic. (Order matters — bold first.)
+    out = _MD_BOLD_RX.sub(lambda m: color(m.group(1), BOLD), out)
+    out = _MD_ITALIC_AST_RX.sub(lambda m: color(m.group(1), ITALIC), out)
+    out = _MD_ITALIC_UND_RX.sub(lambda m: color(m.group(1), ITALIC), out)
+
+    # Inline links: [text](url) → text (url, dimmed).
+    out = _MD_LINK_RX.sub(
+        lambda m: color(m.group(1), TEAL_BRIGHT) + color(f" ({m.group(2)})", SOFT),
+        out,
+    )
+
+    # Restore stashed code.
+    def _restore(m: re.Match) -> str:
+        return placeholders[int(m.group(1))]
+
+    out = re.sub(r"\x00BLOCK(\d+)\x00", _restore, out)
+    out = re.sub(r"\x00INL(\d+)\x00", _restore, out)
+    return out
+
+
+def _wrap_visible(text: str, width: int) -> list[str]:
+    """Wrap `text` to `width` *visible* columns, leaving ANSI escapes intact."""
+    out: list[str] = []
+    for raw in text.splitlines() or [""]:
+        if not raw.strip():
+            out.append("")
+            continue
+        if _vlen(raw) <= width:
+            out.append(raw)
+            continue
+        # Greedy word-wrap; break on spaces. Tracks visible length only.
+        words = raw.split(" ")
+        line = ""
+        for w in words:
+            wlen = _vlen(w)
+            if not line:
+                line = w
+                continue
+            if _vlen(line) + 1 + wlen <= width:
+                line = line + " " + w
+            else:
+                out.append(line)
+                line = w
+        if line:
+            out.append(line)
+    return out
+
+
 # ---------- panels / boxes ----------
 
 # Box characters
@@ -98,21 +236,29 @@ _BX = {
 
 def panel(body: str | list[str], title: str = "", style: str = "round",
           color_c: str = TEAL_DIM, title_c: str = TEAL_BRIGHT,
-          inner_pad: int = 1) -> None:
-    """Print a bordered panel containing wrapped body text."""
+          inner_pad: int = 1, markdown: bool = False) -> None:
+    """Print a bordered panel containing wrapped body text.
+
+    If `markdown=True`, the body is run through render_markdown() and
+    wrapped with a visible-width-aware wrapper that preserves ANSI escapes.
+    """
     tl, tr, bl, br, h, v = _BX[style]
     w = width()
     inner = w - 2 - inner_pad * 2
 
     # body lines (allow either a string or a list of pre-formatted lines)
     if isinstance(body, str):
-        lines: list[str] = []
-        for raw in body.splitlines() or [""]:
-            if not raw.strip():
-                lines.append("")
-                continue
-            # preserve ANSI by wrapping the visible text only
-            lines.extend(textwrap.wrap(raw, width=inner) or [""])
+        if markdown:
+            rendered = render_markdown(body)
+            lines = _wrap_visible(rendered, inner)
+        else:
+            lines = []
+            for raw in body.splitlines() or [""]:
+                if not raw.strip():
+                    lines.append("")
+                    continue
+                # preserve ANSI by wrapping the visible text only
+                lines.extend(textwrap.wrap(raw, width=inner) or [""])
     else:
         lines = list(body)
 
@@ -243,14 +389,15 @@ def error(msg: str) -> None:
 
 
 def assistant(msg: str) -> None:
-    """Render a final assistant answer in a soft panel."""
-    panel(msg, title="answer", style="round", color_c=TEAL_DIM, title_c=TEAL_BRIGHT)
+    """Render a final assistant answer in a soft panel, with markdown styling."""
+    panel(msg, title="answer", style="round", color_c=TEAL_DIM, title_c=TEAL_BRIGHT,
+          markdown=True)
 
 
 def thinking(msg: str) -> None:
-    """Render <think>…</think> content dim-italic in a panel."""
-    rendered = color(msg, MUTED + ITALIC) if _supports_color() else msg
-    panel(rendered, title="thinking", style="round", color_c=SOFT, title_c=MUTED)
+    """Render <think>…</think> content dim-italic in a panel, with markdown."""
+    panel(msg, title="thinking", style="round", color_c=SOFT, title_c=MUTED,
+          markdown=True)
 
 
 def plan(items: list[str]) -> None:
