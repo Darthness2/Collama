@@ -127,6 +127,13 @@ class Prompt:
 
     def ask(self, prompt: str) -> str:
         if self._pt is not None:
-            return self._pt.prompt(prompt)
+            # prompt_toolkit has its own renderer; on Windows it treats raw
+            # ANSI escapes in the prompt string as literal text. Wrapping
+            # with ANSI(...) tells it to parse our escapes.
+            try:
+                from prompt_toolkit.formatted_text import ANSI
+                return self._pt.prompt(ANSI(prompt))
+            except Exception:
+                return self._pt.prompt(prompt)
         # plain input(); readline (if installed) decorates it with TAB-completion
         return input(prompt)
