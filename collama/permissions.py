@@ -16,13 +16,17 @@ from .state import AppState
 
 # Tools that don't mutate anything we care about — always allowed.
 READ_ONLY: set[str] = {
-    "read_file", "list_dir", "grep",
+    "read_file", "list_dir", "grep", "glob", "tool_search",
+    "web_fetch", "web_search",
+    "task_get", "task_list", "task_output", "task_status",
+    "inbox", "team_list", "teammate_list",
+    "config_get", "sleep",
     "gh_whoami", "gh_list_repos", "gh_get_repo", "gh_get_file",
     "gh_list_issues", "gh_list_pulls", "gh_get_pull", "gh_search_code",
 }
 
 
-# Tools that are safe to run concurrently (read-only, no shared mutable state).
+# Tools that are safe to run concurrently (no shared mutable state).
 CONCURRENT_SAFE: set[str] = READ_ONLY | {"set_workspace"}
 
 
@@ -47,6 +51,14 @@ def can_use_tool(
         return True, "permission cache: always"
     if cached == "never":
         return False, "permission cache: never"
+
+    # Plan-mode gate: only read-only tools are allowed.
+    if getattr(state, "plan_mode", False) and name not in READ_ONLY and name not in {
+        "enter_plan_mode", "exit_plan_mode", "ask_user_question", "brief",
+        "todo_write", "tool_search", "task_get", "task_list", "task_output",
+        "team_list", "teammate_list", "inbox", "config_get",
+    }:
+        return False, "plan mode active — mutating tools blocked"
 
     if name in READ_ONLY:
         return True, "read-only tool"

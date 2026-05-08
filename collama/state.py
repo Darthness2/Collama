@@ -39,6 +39,19 @@ class AppState:
     # worktree stack — entered worktree dirs we'll pop back to.
     worktree_stack: list[str] = field(default_factory=list)
 
+    # Plan mode (s03 reinforced): when on, the agent must produce a plan and
+    # NOT call mutating tools — read-only inspection only.
+    plan_mode: bool = False
+
+    # Lightweight per-session todo list (TodoWrite).
+    todos: list[dict] = field(default_factory=list)
+
+    # In-memory briefs (BriefTool): name -> markdown.
+    briefs: dict[str, str] = field(default_factory=dict)
+
+    # Cron-like schedules (s07/s08 hybrid): list of {id, expr, prompt, last_run}.
+    schedules: list[dict] = field(default_factory=list)
+
     # per-model facts learned at runtime (e.g. tools_supported)
     models: dict[str, dict] = field(default_factory=dict)
 

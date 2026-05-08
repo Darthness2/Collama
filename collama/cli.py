@@ -40,6 +40,9 @@ Slash commands:
   /wt                     show worktree stack (s12)
   /teams                  list teams and teammates (s09)
   /tick [team] [claim]    coordinator tick — process mailboxes; pass 'claim' to auto-claim tasks (s11)
+  /plan on|off            toggle plan mode (read-only, no mutating tools)
+  /todo [add|done|clear]  view or modify the session todo list
+  /brief [name]           list briefs, or print one
   /insecure on|off        toggle SSL verification for HTTPS calls (school/corp MITM proxies)
   /diag                   print model / workspace / home / tools / github status
   /model [name]           show or switch model
@@ -257,6 +260,60 @@ def repl(agent: Agent, cfg: dict) -> int:
                     first = r.answer.splitlines()[0][:120] if r.answer else ""
                     if first:
                         print(ui.color(f"      {first}", ui.MUTED))
+                continue
+            if cmd == "plan":
+                want = arg1.lower() if arg1 else ("off" if agent.state.plan_mode else "on")
+                if want not in ("on", "off"):
+                    ui.warn("usage: /plan on|off")
+                    continue
+                agent.state.update(plan_mode=(want == "on"))
+                agent.engine.refresh_system_prompt()
+                ui.info(f"plan mode: {'ON (read-only)' if agent.state.plan_mode else 'off'}")
+                continue
+            if cmd == "todo":
+                todos = list(agent.state.todos or [])
+                if not arg1:
+                    if not todos:
+                        ui.info("(no todos)")
+                    for i, t in enumerate(todos, 1):
+                        mark = {"done": "✓", "pending": " ", "active": "▸", "blocked": "✗"}.get(t.get("status", "pending"), "?")
+                        print(f"  [{mark}] {i}. {t.get('text', '')}")
+                    continue
+                # /todo add <text>  or  /todo done N  or  /todo clear
+                if arg1 == "add":
+                    text = arg2.strip()
+                    if not text:
+                        ui.warn("usage: /todo add <text>")
+                        continue
+                    todos.append({"text": text, "status": "pending"})
+                    agent.state.update(todos=todos)
+                    ui.info(f"added: {text}")
+                    continue
+                if arg1 == "done" and arg2.isdigit():
+                    i = int(arg2) - 1
+                    if 0 <= i < len(todos):
+                        todos[i]["status"] = "done"
+                        agent.state.update(todos=todos)
+                        ui.info(f"done: {todos[i]['text']}")
+                    continue
+                if arg1 == "clear":
+                    agent.state.update(todos=[])
+                    ui.info("cleared todos")
+                    continue
+                ui.warn("usage: /todo  |  /todo add <text>  |  /todo done <n>  |  /todo clear")
+                continue
+            if cmd == "brief":
+                briefs = agent.state.briefs
+                if not arg1:
+                    if not briefs:
+                        ui.info("(no briefs)")
+                    for k, v in briefs.items():
+                        print(f"  - {k}  ({len(v)} chars)")
+                    continue
+                if arg1 in briefs:
+                    print(briefs[arg1])
+                else:
+                    ui.warn(f"no brief named '{arg1}'")
                 continue
             if cmd == "diag":
                 ui.info(f"model:    {agent.model}")

@@ -524,6 +524,464 @@ def t_coordinator_run(args: dict, ctx: ToolContext) -> str:
     return "\n".join(rounds) if rounds else "(idle — nothing to do)"
 
 
+# ============================================================================
+# Extended toolset: file/search/web/system/skills/planning/interaction
+# ============================================================================
+
+# -------------------------------------------------------------- search/glob
+
+def t_glob(args: dict, ctx: ToolContext) -> str:
+    """GlobTool — file pattern matching (supports **)."""
+    import fnmatch
+    pattern = args["pattern"]
+    base = _resolve(args.get("path", "."), ctx.root)
+    if not base.exists() or not base.is_dir():
+        return f"ERROR: not a directory: {base}"
+    skip_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"}
+    matches: list[str] = []
+    if "**" in pattern or "/" in pattern:
+        for p in base.rglob("*"):
+            if any(part in skip_dirs for part in p.parts):
+                continue
+            rel = p.relative_to(base)
+            if fnmatch.fnmatch(str(rel), pattern):
+                matches.append(str(rel))
+    else:
+        for p in base.iterdir():
+            if fnmatch.fnmatch(p.name, pattern):
+                matches.append(p.name)
+    matches.sort()
+    return _truncate("\n".join(matches[:500]) if matches else "(no matches)")
+
+
+def t_tool_search(args: dict, ctx: ToolContext) -> str:
+    """ToolSearchTool — find tools by keyword in name or description."""
+    q = (args.get("query") or "").lower().strip()
+    schemas = TOOL_SCHEMAS
+    out: list[str] = []
+    for s in schemas:
+        fn = s.get("function") or {}
+        name = fn.get("name", "")
+        desc = fn.get("description", "")
+        hay = f"{name} {desc}".lower()
+        if not q or q in hay:
+            out.append(f"{name}  —  {desc.splitlines()[0][:140] if desc else ''}")
+    return _truncate("\n".join(out) if out else "(no matching tools)")
+
+
+# -------------------------------------------------------------- powershell
+
+def t_powershell(args: dict, ctx: ToolContext) -> str:
+    """PowerShellTool — run a command via pwsh / powershell.exe."""
+    import shutil as _shutil
+    pwsh = _shutil.which("pwsh") or _shutil.which("powershell")
+    if not pwsh:
+        return "ERROR: PowerShell not installed (pwsh / powershell.exe not on PATH)"
+    cmd = args["command"]
+    timeout = int(args.get("timeout", 60))
+    if not ctx.confirm("PowerShell command", cmd):
+        return "ERROR: user denied command"
+    try:
+        proc = subprocess.run(
+            [pwsh, "-NoProfile", "-NonInteractive", "-Command", cmd],
+            cwd=str(ctx.root), capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return f"ERROR: timed out after {timeout}s"
+    parts = [f"exit code: {proc.returncode}"]
+    if proc.stdout:
+        parts.append(f"--- stdout ---\n{proc.stdout}")
+    if proc.stderr:
+        parts.append(f"--- stderr ---\n{proc.stderr}")
+    return _truncate("\n".join(parts))
+
+
+# -------------------------------------------------------------- web
+
+def t_web_fetch(args: dict, ctx: ToolContext) -> str:
+    """WebFetchTool — fetch a URL and return text (HTML or JSON)."""
+    import requests
+    url = args["url"]
+    if not url.startswith(("http://", "https://")):
+        return "ERROR: url must be http:// or https://"
+    timeout = int(args.get("timeout", 20))
+    max_bytes = int(args.get("max_bytes", 200_000))
+    headers = {"User-Agent": "collama/0.1 (+https://github.com/Darthness2/Collama)"}
+    try:
+        r = requests.get(url, timeout=timeout, headers=headers,
+                         verify=not ctx.insecure_ssl, stream=True)
+    except requests.RequestException as e:
+        return f"ERROR: fetch failed: {e}"
+    chunks: list[bytes] = []
+    seen = 0
+    for chunk in r.iter_content(8192):
+        chunks.append(chunk)
+        seen += len(chunk)
+        if seen >= max_bytes:
+            break
+    raw = b"".join(chunks)
+    try:
+        body = raw.decode(r.encoding or "utf-8", errors="replace")
+    except Exception:
+        body = raw.decode("utf-8", errors="replace")
+    return _truncate(f"HTTP {r.status_code}  {url}\n{body}")
+
+
+def t_web_search(args: dict, ctx: ToolContext) -> str:
+    """WebSearchTool — DuckDuckGo HTML-frontend scrape (no API key needed)."""
+    import re as _re
+    import requests
+    q = args["query"]
+    n = int(args.get("limit", 10))
+    try:
+        r = requests.get(
+            "https://duckduckgo.com/html/", params={"q": q},
+            headers={"User-Agent": "Mozilla/5.0 collama/0.1"},
+            timeout=15, verify=not ctx.insecure_ssl,
+        )
+    except requests.RequestException as e:
+        return f"ERROR: search failed: {e}"
+    if r.status_code != 200:
+        return f"ERROR: HTTP {r.status_code}"
+    # Lightweight parse — DuckDuckGo HTML wraps results in <a class="result__a">.
+    rx = _re.compile(r'<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', _re.DOTALL)
+    items = rx.findall(r.text)
+    out: list[str] = []
+    for href, title in items[:n]:
+        title_text = _re.sub(r"<[^>]+>", "", title).strip()
+        out.append(f"- {title_text}\n  {href}")
+    return _truncate("\n".join(out) if out else "(no results)")
+
+
+# -------------------------------------------------------------- notebook
+
+def t_notebook_edit(args: dict, ctx: ToolContext) -> str:
+    """NotebookEditTool — insert/replace/delete cells in a Jupyter .ipynb file."""
+    import json as _json
+    path = args["path"]
+    op = args.get("op", "replace")  # replace | insert | delete | get
+    cell_index = args.get("cell_index")
+    new_source = args.get("source", "")
+    cell_type = args.get("cell_type", "code")  # code | markdown | raw
+    p = _resolve(path, ctx.root)
+    if not p.exists():
+        if op == "insert" and not cell_index:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            nb = {"cells": [], "metadata": {}, "nbformat": 4, "nbformat_minor": 5}
+        else:
+            return f"ERROR: file not found: {path}"
+    else:
+        try:
+            nb = _json.loads(p.read_text())
+        except _json.JSONDecodeError as e:
+            return f"ERROR: invalid notebook JSON: {e}"
+    cells = nb.setdefault("cells", [])
+
+    if op == "get":
+        if cell_index is None:
+            return _truncate("\n\n".join(
+                f"# cell {i} [{c.get('cell_type','?')}]\n" +
+                ("".join(c.get("source", [])) if isinstance(c.get("source"), list) else (c.get("source") or ""))
+                for i, c in enumerate(cells)
+            ))
+        i = int(cell_index)
+        if not 0 <= i < len(cells):
+            return f"ERROR: cell_index {i} out of range"
+        c = cells[i]
+        return f"cell {i} [{c.get('cell_type','?')}]\n" + (
+            "".join(c.get("source", [])) if isinstance(c.get("source"), list) else (c.get("source") or ""))
+
+    if not ctx.confirm("notebook edit", f"{op} {path} [cell {cell_index}]"):
+        return "ERROR: user denied"
+
+    if op == "replace":
+        i = int(cell_index)
+        if not 0 <= i < len(cells):
+            return f"ERROR: cell_index {i} out of range"
+        cells[i]["source"] = new_source
+        if cell_type:
+            cells[i]["cell_type"] = cell_type
+    elif op == "insert":
+        i = len(cells) if cell_index is None else int(cell_index)
+        new_cell = {"cell_type": cell_type, "source": new_source, "metadata": {}}
+        if cell_type == "code":
+            new_cell["execution_count"] = None
+            new_cell["outputs"] = []
+        cells.insert(max(0, min(i, len(cells))), new_cell)
+    elif op == "delete":
+        i = int(cell_index)
+        if not 0 <= i < len(cells):
+            return f"ERROR: cell_index {i} out of range"
+        del cells[i]
+    else:
+        return f"ERROR: unknown op '{op}'"
+
+    p.write_text(_json.dumps(nb, indent=1))
+    return f"OK: {op} on {path} (now {len(cells)} cells)"
+
+
+# -------------------------------------------------------------- interaction
+
+def t_ask_user_question(args: dict, ctx: ToolContext) -> str:
+    """AskUserQuestionTool — pause and ask the user."""
+    question = args["question"]
+    options = args.get("options") or []
+    if ctx.yolo:
+        return "ERROR: cannot ask user in yolo mode"
+    print()
+    from . import ui
+    ui.warn("? " + question)
+    for i, opt in enumerate(options, 1):
+        print(f"  {i}. {opt}")
+    try:
+        ans = input("  > ").strip()
+    except EOFError:
+        return "ERROR: no tty"
+    if options and ans.isdigit():
+        idx = int(ans) - 1
+        if 0 <= idx < len(options):
+            return options[idx]
+    return ans or "(empty)"
+
+
+def t_brief(args: dict, ctx: ToolContext) -> str:
+    """BriefTool — store/retrieve a short markdown brief on the session state."""
+    state = getattr(ctx, "state", None)
+    if state is None:
+        return "ERROR: state not available"
+    op = args.get("op", "set")
+    name = args["name"]
+    if op == "get":
+        return state.briefs.get(name, f"(no brief named '{name}')")
+    if op == "list":
+        return "\n".join(f"- {k}  ({len(v)} chars)" for k, v in state.briefs.items()) or "(no briefs)"
+    if op == "delete":
+        state.briefs.pop(name, None)
+        state.update(briefs=dict(state.briefs))
+        return f"OK: deleted brief '{name}'"
+    # set
+    text = args.get("content") or ""
+    state.briefs[name] = text
+    state.update(briefs=dict(state.briefs))
+    return f"OK: brief '{name}' saved ({len(text)} chars)"
+
+
+# -------------------------------------------------------------- planning
+
+def t_enter_plan_mode(args: dict, ctx: ToolContext) -> str:
+    """EnterPlanModeTool — read-only mode for safe exploration before execution."""
+    state = getattr(ctx, "state", None)
+    if state is None:
+        return "ERROR: state not available"
+    state.update(plan_mode=True)
+    engine = getattr(ctx, "engine", None)
+    if engine is not None:
+        try:
+            engine.refresh_system_prompt()
+        except Exception:
+            pass
+    return "OK: PLAN MODE entered. Mutating tools (write_file, edit_file, run_bash, etc.) will be denied. Use exit_plan_mode to resume."
+
+
+def t_exit_plan_mode(args: dict, ctx: ToolContext) -> str:
+    state = getattr(ctx, "state", None)
+    if state is None:
+        return "ERROR: state not available"
+    state.update(plan_mode=False)
+    engine = getattr(ctx, "engine", None)
+    if engine is not None:
+        try:
+            engine.refresh_system_prompt()
+        except Exception:
+            pass
+    return "OK: plan mode OFF. Mutating tools allowed again."
+
+
+def t_todo_write(args: dict, ctx: ToolContext) -> str:
+    """TodoWriteTool — write or update the per-session todo list."""
+    state = getattr(ctx, "state", None)
+    if state is None:
+        return "ERROR: state not available"
+    items = args.get("items")
+    if not isinstance(items, list):
+        return "ERROR: items must be a list of {text, status?}"
+    todos: list[dict] = []
+    for it in items:
+        if isinstance(it, str):
+            todos.append({"text": it, "status": "pending"})
+        elif isinstance(it, dict) and "text" in it:
+            todos.append({"text": it["text"], "status": it.get("status", "pending")})
+    state.update(todos=todos)
+    out = "\n".join(f"  [{t['status'][0]}] {t['text']}" for t in todos)
+    return f"OK: {len(todos)} todo(s):\n{out}"
+
+
+# -------------------------------------------------------------- system
+
+def t_config_get(args: dict, ctx: ToolContext) -> str:
+    """ConfigTool (get) — read a value from the persistent config."""
+    engine = getattr(ctx, "engine", None)
+    if engine is None or engine.config is None:
+        return "ERROR: config not available"
+    from .config import get_value
+    key = args["key"]
+    v = get_value(engine.config, key, None)
+    if v is None:
+        return f"(unset: {key})"
+    return f"{key} = {v}"
+
+
+def t_config_set(args: dict, ctx: ToolContext) -> str:
+    engine = getattr(ctx, "engine", None)
+    if engine is None or engine.config is None:
+        return "ERROR: config not available"
+    from .config import set_value, save
+    key = args["key"]
+    val = args["value"]
+    if not ctx.confirm("config set", f"{key} = {val}"):
+        return "ERROR: user denied"
+    set_value(engine.config, key, val)
+    save(engine.config)
+    return f"OK: {key} = {val} (saved)"
+
+
+def t_sleep(args: dict, ctx: ToolContext) -> str:
+    """SleepTool — pause for N seconds. Capped at 60s."""
+    import time as _time
+    secs = float(args.get("seconds", 1))
+    secs = max(0.0, min(60.0, secs))
+    _time.sleep(secs)
+    return f"OK: slept {secs}s"
+
+
+def t_schedule_cron(args: dict, ctx: ToolContext) -> str:
+    """ScheduleCronTool — register a recurring prompt (in-memory only this session)."""
+    state = getattr(ctx, "state", None)
+    if state is None:
+        return "ERROR: state not available"
+    import time as _time
+    sched = list(state.schedules or [])
+    sid = f"s{len(sched):04d}"
+    entry = {
+        "id": sid,
+        "every_seconds": int(args.get("every_seconds", 0)),
+        "expr": args.get("expr", ""),
+        "prompt": args["prompt"],
+        "last_run": 0.0,
+        "registered_at": _time.time(),
+    }
+    sched.append(entry)
+    state.update(schedules=sched)
+    return f"OK: scheduled {sid} (run every {entry['every_seconds']}s, when due will inject the prompt on the next turn)"
+
+
+# -------------------------------------------------------------- task control
+
+def t_task_stop(args: dict, ctx: ToolContext) -> str:
+    """TaskStopTool — mark a task cancelled. (Background threads can't be killed
+    cleanly in pure-Python; we mark cancelled and ignore the result.)"""
+    bg = getattr(ctx, "background", None)
+    tid = args["id"]
+    if bg is not None:
+        job = bg.status(tid)
+        if job and job.status == "running":
+            job.status = "cancelled"
+            return f"OK: marked background job {tid} cancelled (the thread may still finish)"
+    tasks = getattr(ctx, "tasks", None)
+    if tasks is not None:
+        if tasks.update(tid, status="cancelled"):
+            return f"OK: task {tid} marked cancelled"
+    return f"ERROR: no task/job with id {tid}"
+
+
+def t_task_output(args: dict, ctx: ToolContext) -> str:
+    """TaskOutputTool — read the result/output of a task or background job."""
+    bg = getattr(ctx, "background", None)
+    tasks = getattr(ctx, "tasks", None)
+    tid = args["id"]
+    if bg is not None:
+        job = bg.status(tid)
+        if job:
+            return _truncate(f"[bg {job.id} status={job.status}]\n{job.result}")
+    if tasks is not None:
+        t = tasks.get(tid)
+        if t:
+            return _truncate(f"[task {t.id} status={t.status}]\n{t.result}")
+    return f"ERROR: no task/job with id {tid}"
+
+
+# -------------------------------------------------------------- skills
+
+def t_skill(args: dict, ctx: ToolContext) -> str:
+    """SkillTool — append a named skill's instructions onto the engine for the
+    rest of the session. Skills live at ~/.config/collama/skills/<name>.md
+    (or .txt). The contents become a system-prompt addendum.
+    """
+    import os as _os
+    from .config import config_dir
+    op = args.get("op", "use")
+    name = args.get("name", "")
+    skills_dir = config_dir() / "skills"
+    skills_dir.mkdir(parents=True, exist_ok=True)
+
+    if op == "list":
+        files = sorted(skills_dir.glob("*"))
+        if not files:
+            return "(no skills installed; drop *.md files in " + str(skills_dir) + ")"
+        return "\n".join(f"- {f.stem}  ({f.stat().st_size} bytes)" for f in files)
+
+    if not name:
+        return "ERROR: skill name required"
+    candidate = None
+    for ext in (".md", ".txt", ""):
+        c = skills_dir / f"{name}{ext}"
+        if c.exists():
+            candidate = c
+            break
+    if op == "get":
+        if not candidate:
+            return f"ERROR: no skill '{name}'"
+        return _truncate(candidate.read_text(errors="replace"))
+
+    if op == "use":
+        if not candidate:
+            return f"ERROR: no skill '{name}'"
+        engine = getattr(ctx, "engine", None)
+        if engine is None:
+            return "ERROR: engine not available"
+        body = candidate.read_text(errors="replace")
+        if engine.messages and engine.messages[0].get("role") == "system":
+            engine.messages[0]["content"] += f"\n\n=== SKILL: {name} ===\n{body}"
+        return f"OK: skill '{name}' attached to system prompt ({len(body)} chars)"
+
+    return f"ERROR: unknown op '{op}'"
+
+
+# -------------------------------------------------------------- mcp / lsp / tungsten (stubs)
+
+def t_mcp(args: dict, ctx: ToolContext) -> str:
+    return ("ERROR: MCP server not configured. To enable, install an MCP "
+            "server, set its URL in ~/.config/collama/config.json under "
+            "mcp.servers.<name>, and re-run.")
+
+
+def t_mcp_list_resources(args: dict, ctx: ToolContext) -> str:
+    return t_mcp(args, ctx)
+
+
+def t_mcp_read_resource(args: dict, ctx: ToolContext) -> str:
+    return t_mcp(args, ctx)
+
+
+def t_lsp(args: dict, ctx: ToolContext) -> str:
+    return ("ERROR: LSP not configured. Configure a language server (e.g. "
+            "pyright, gopls) under lsp.servers in config.json. Stub.")
+
+
+def t_tungsten(args: dict, ctx: ToolContext) -> str:
+    return "ERROR: TungstenTool is a placeholder; not implemented in Collama."
+
+
 def t_run_bash(args: dict, ctx: ToolContext) -> str:
     cmd = args["command"]
     timeout = int(args.get("timeout", 60))
@@ -588,6 +1046,30 @@ TOOLS: dict[str, ToolFn] = {
     # s11 coordinator
     "coordinator_tick": t_coordinator_tick,
     "coordinator_run": t_coordinator_run,
+    # extended tools
+    "glob": t_glob,
+    "tool_search": t_tool_search,
+    "powershell": t_powershell,
+    "web_fetch": t_web_fetch,
+    "web_search": t_web_search,
+    "notebook_edit": t_notebook_edit,
+    "ask_user_question": t_ask_user_question,
+    "brief": t_brief,
+    "enter_plan_mode": t_enter_plan_mode,
+    "exit_plan_mode": t_exit_plan_mode,
+    "todo_write": t_todo_write,
+    "config_get": t_config_get,
+    "config_set": t_config_set,
+    "sleep": t_sleep,
+    "schedule_cron": t_schedule_cron,
+    "task_stop": t_task_stop,
+    "task_output": t_task_output,
+    "skill": t_skill,
+    "mcp": t_mcp,
+    "mcp_list_resources": t_mcp_list_resources,
+    "mcp_read_resource": t_mcp_read_resource,
+    "lsp": t_lsp,
+    "tungsten": t_tungsten,
 }
 
 
@@ -876,6 +1358,181 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "max_rounds": {"type": "integer"},
             "auto_claim": {"type": "boolean"},
         }},
+    }},
+
+    # ---------- extended file / search ----------
+    {"type": "function", "function": {
+        "name": "glob",
+        "description": "File pattern matching. Supports ** for recursive globs (e.g. **/*.py, src/*.ts).",
+        "parameters": {"type": "object", "properties": {
+            "pattern": {"type": "string"}, "path": {"type": "string"},
+        }, "required": ["pattern"]},
+    }},
+    {"type": "function", "function": {
+        "name": "tool_search",
+        "description": "Search the registered tools by keyword in their name or description.",
+        "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
+    }},
+
+    # ---------- shell variants ----------
+    {"type": "function", "function": {
+        "name": "powershell",
+        "description": "Run a command via pwsh / powershell.exe. Asks for approval.",
+        "parameters": {"type": "object", "properties": {
+            "command": {"type": "string"}, "timeout": {"type": "integer"},
+        }, "required": ["command"]},
+    }},
+
+    # ---------- web ----------
+    {"type": "function", "function": {
+        "name": "web_fetch",
+        "description": "Fetch a URL (HTTP/HTTPS) and return the body text. Caps at ~200 KB.",
+        "parameters": {"type": "object", "properties": {
+            "url": {"type": "string"},
+            "timeout": {"type": "integer"},
+            "max_bytes": {"type": "integer"},
+        }, "required": ["url"]},
+    }},
+    {"type": "function", "function": {
+        "name": "web_search",
+        "description": "Search the web (DuckDuckGo HTML frontend). Returns title + URL pairs.",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string"}, "limit": {"type": "integer"},
+        }, "required": ["query"]},
+    }},
+
+    # ---------- notebook ----------
+    {"type": "function", "function": {
+        "name": "notebook_edit",
+        "description": "Get/insert/replace/delete a cell in a Jupyter .ipynb file.",
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string"},
+            "op": {"type": "string", "enum": ["get", "insert", "replace", "delete"]},
+            "cell_index": {"type": "integer"},
+            "source": {"type": "string"},
+            "cell_type": {"type": "string", "enum": ["code", "markdown", "raw"]},
+        }, "required": ["path"]},
+    }},
+
+    # ---------- interaction ----------
+    {"type": "function", "function": {
+        "name": "ask_user_question",
+        "description": "Pause and ask the user a question. Optionally offer multiple-choice options.",
+        "parameters": {"type": "object", "properties": {
+            "question": {"type": "string"},
+            "options": {"type": "array", "items": {"type": "string"}},
+        }, "required": ["question"]},
+    }},
+    {"type": "function", "function": {
+        "name": "brief",
+        "description": "Store / retrieve / list a named markdown brief in this session.",
+        "parameters": {"type": "object", "properties": {
+            "op": {"type": "string", "enum": ["set", "get", "list", "delete"]},
+            "name": {"type": "string"},
+            "content": {"type": "string"},
+        }, "required": ["name"]},
+    }},
+
+    # ---------- planning / workflow ----------
+    {"type": "function", "function": {
+        "name": "enter_plan_mode",
+        "description": "Enter PLAN MODE: read-only, no mutating tools. Use to safely explore before committing to changes.",
+        "parameters": {"type": "object", "properties": {}},
+    }},
+    {"type": "function", "function": {
+        "name": "exit_plan_mode",
+        "description": "Leave plan mode; mutating tools allowed again.",
+        "parameters": {"type": "object", "properties": {}},
+    }},
+    {"type": "function", "function": {
+        "name": "todo_write",
+        "description": "Replace this session's todo list. Items are strings or {text, status}.",
+        "parameters": {"type": "object", "properties": {
+            "items": {"type": "array", "items": {}},
+        }, "required": ["items"]},
+    }},
+
+    # ---------- system ----------
+    {"type": "function", "function": {
+        "name": "config_get",
+        "description": "Read a value from the persistent config (dotted key, e.g. 'github.token').",
+        "parameters": {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]},
+    }},
+    {"type": "function", "function": {
+        "name": "config_set",
+        "description": "Set a config value. Asks for approval.",
+        "parameters": {"type": "object", "properties": {
+            "key": {"type": "string"}, "value": {},
+        }, "required": ["key", "value"]},
+    }},
+    {"type": "function", "function": {
+        "name": "sleep",
+        "description": "Pause execution for `seconds` (capped at 60).",
+        "parameters": {"type": "object", "properties": {"seconds": {"type": "number"}}},
+    }},
+    {"type": "function", "function": {
+        "name": "schedule_cron",
+        "description": "Register a recurring prompt; on each turn the engine checks if any schedule is due and re-runs the prompt. (In-memory for now.)",
+        "parameters": {"type": "object", "properties": {
+            "prompt": {"type": "string"},
+            "every_seconds": {"type": "integer"},
+            "expr": {"type": "string"},
+        }, "required": ["prompt"]},
+    }},
+
+    # ---------- task control ----------
+    {"type": "function", "function": {
+        "name": "task_stop",
+        "description": "Mark a task or background job cancelled.",
+        "parameters": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
+    }},
+    {"type": "function", "function": {
+        "name": "task_output",
+        "description": "Read the result/output of a task or background job by id.",
+        "parameters": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
+    }},
+
+    # ---------- skills ----------
+    {"type": "function", "function": {
+        "name": "skill",
+        "description": "Manage and apply skills (markdown bundles in ~/.config/collama/skills/). op: list | get | use.",
+        "parameters": {"type": "object", "properties": {
+            "op": {"type": "string", "enum": ["list", "get", "use"]},
+            "name": {"type": "string"},
+        }},
+    }},
+
+    # ---------- MCP / LSP / tungsten (stubs) ----------
+    {"type": "function", "function": {
+        "name": "mcp",
+        "description": "Generic MCP tool call. Stubbed — returns ERROR until an MCP server is configured.",
+        "parameters": {"type": "object", "properties": {
+            "server": {"type": "string"}, "tool": {"type": "string"}, "arguments": {"type": "object"},
+        }},
+    }},
+    {"type": "function", "function": {
+        "name": "mcp_list_resources",
+        "description": "List resources exposed by an MCP server. Stub.",
+        "parameters": {"type": "object", "properties": {"server": {"type": "string"}}},
+    }},
+    {"type": "function", "function": {
+        "name": "mcp_read_resource",
+        "description": "Read an MCP resource by URI. Stub.",
+        "parameters": {"type": "object", "properties": {
+            "server": {"type": "string"}, "uri": {"type": "string"},
+        }},
+    }},
+    {"type": "function", "function": {
+        "name": "lsp",
+        "description": "Call into a language server (definitions / references / hover). Stub.",
+        "parameters": {"type": "object", "properties": {
+            "method": {"type": "string"}, "params": {"type": "object"},
+        }},
+    }},
+    {"type": "function", "function": {
+        "name": "tungsten",
+        "description": "Reserved placeholder — not implemented.",
+        "parameters": {"type": "object", "properties": {}},
     }},
 ]
 
