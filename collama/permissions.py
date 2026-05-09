@@ -79,7 +79,13 @@ def can_use_tool(
 
 
 def terminal_resolver(name: str, args: dict, state: AppState) -> str:
-    """Interactive REPL resolver: ask the user [y]es / [n]o / [a]lways / never."""
+    """Interactive REPL resolver. Choices:
+        y / yes      → allow this one call
+        n / no       → deny this one call
+        a / always   → always allow THIS tool from now on
+        A / all      → flip yolo mode ON: allow EVERYTHING for the rest of the session
+        N / never    → never allow this tool again
+    """
     from . import ui
     detail = ""
     if name == "run_bash":
@@ -92,13 +98,19 @@ def terminal_resolver(name: str, args: dict, state: AppState) -> str:
         detail = f": {name} {args}"
     ui.warn(f"\nApprove {name}{detail}?")
     try:
-        ans = input("  [y]es / [n]o / [a]lways / [N]ever: ").strip().lower()
+        ans = input("  [y]es / [n]o / [a]lways this tool / [A]ll (yolo) / [N]ever: ").strip()
     except EOFError:
         return "no"
-    if ans in ("a", "always"):
-        return "always"
-    if ans == "never":
+    if ans in ("A", "all", "yall", "yolo", "yes-all", "yesall"):
+        # Flip the global state so we never prompt again this session.
+        state.update(yolo=True)
+        ui.info("yolo mode ON — no further approval prompts this session. Toggle with /yolo.")
+        return "yes"
+    low = ans.lower()
+    if low in ("a", "always"):
+        return always
+    if low == "never":
         return "never"
-    if ans in ("y", "yes"):
+    if low in ("y", "yes"):
         return "yes"
     return "no"

@@ -65,7 +65,7 @@ from .teams import TeamRegistry
 from .tools import ToolContext, all_tool_schemas, dispatch
 
 
-MAX_TOOL_ITERATIONS = 25
+MAX_TOOL_ITERATIONS = 1000
 LOOP_THRESHOLD = 3
 COMPACT_TOKENS = 12000
 COMPACT_KEEP_RECENT = 12
