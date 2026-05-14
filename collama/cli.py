@@ -197,6 +197,8 @@ def repl(agent: Agent, cfg: dict) -> int:
     ui.info(f"new session: {session['id']}")
 
     prompt = Prompt()
+    if prompt.status_note:
+        ui.warn(prompt.status_note)
     while True:
         ui.prepare_for_input()
         # The blank separator line must be printed SEPARATELY — never embed a

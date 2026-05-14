@@ -45,14 +45,22 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
 
 
 def _build_pt_session():
-    """Try to build a prompt_toolkit PromptSession with a slash completer."""
+    """Try to build a prompt_toolkit PromptSession with a slash completer.
+
+    Returns (session, error). On success error is None; on failure session
+    is None and error explains why (so the caller can tell the user instead
+    of silently degrading to readline).
+    """
     try:
         from prompt_toolkit import PromptSession
         from prompt_toolkit.completion import Completer, Completion
         from prompt_toolkit.history import FileHistory
+        from prompt_toolkit.shortcuts import CompleteStyle
         from prompt_toolkit.styles import Style
-    except ImportError:
-        return None
+    except ImportError as e:
+        return None, f"prompt_toolkit not installed ({e}). Run: pip install prompt_toolkit"
+    except Exception as e:  # pragma: no cover
+        return None, f"prompt_toolkit import failed: {type(e).__name__}: {e}"
 
     from .config import config_dir
 
@@ -88,12 +96,18 @@ def _build_pt_session():
     # NOTE: AutoSuggestFromHistory was previously enabled here. It shows
     # greyed-out "ghost" text past the cursor matching prior inputs, which
     # users mistook for their typed text disappearing. Disabled by default.
-    return PromptSession(
-        completer=SlashCompleter(),
-        complete_while_typing=True,
-        history=FileHistory(str(history_path)),
-        style=style,
-    )
+    try:
+        session = PromptSession(
+            completer=SlashCompleter(),
+            complete_while_typing=True,          # show the popup as you type
+            complete_style=CompleteStyle.MULTI_COLUMN,
+            reserve_space_for_menu=8,            # always leave room for the menu
+            history=FileHistory(str(history_path)),
+            style=style,
+        )
+    except Exception as e:  # pragma: no cover
+        return None, f"prompt_toolkit session build failed: {type(e).__name__}: {e}"
+    return session, None
 
 
 def _install_readline_fallback() -> bool:
@@ -119,7 +133,7 @@ def _install_readline_fallback() -> bool:
 
 class Prompt:
     def __init__(self) -> None:
-        self._pt = _build_pt_session()
+        self._pt, self._pt_error = _build_pt_session()
         if self._pt is None:
             self._readline = _install_readline_fallback()
         else:
@@ -135,6 +149,17 @@ class Prompt:
         if self._readline:
             return "readline"
         return "plain"
+
+    @property
+    def status_note(self) -> str | None:
+        """A human-readable note when the live popup isn't available."""
+        if self._pt is not None:
+            return None
+        reason = self._pt_error or "prompt_toolkit unavailable"
+        if self._readline:
+            return (f"slash-command popup OFF — {reason}. "
+                    f"TAB still completes /commands.")
+        return f"slash-command popup OFF — {reason}."
 
     def ask(self, prompt: str) -> str:
         if self._pt is not None:
