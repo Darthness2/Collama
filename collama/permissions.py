@@ -108,7 +108,7 @@ def terminal_resolver(name: str, args: dict, state: AppState) -> str:
         return "yes"
     low = ans.lower()
     if low in ("a", "always"):
-        return always
+        return "always"
     if low == "never":
         return "never"
     if low in ("y", "yes"):
