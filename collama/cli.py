@@ -592,6 +592,18 @@ def main(argv: list[str] | None = None) -> int:
         ui.error(f"workspace not a directory: {root}")
         return 2
 
+    # If launched from inside the Collama install dir itself (and -C wasn't
+    # explicitly given), default the workspace to the home dir — otherwise the
+    # model creates new projects inside the Collama repo.
+    if args.cwd == ".":
+        collama_root = Path(__file__).resolve().parent.parent
+        inside_install = root == collama_root or collama_root in root.parents
+        if inside_install:
+            root = Path.home()
+            ui.warn(f"launched inside the Collama install dir — workspace set to your "
+                    f"home dir ({root}) so new projects don't land in the Collama repo. "
+                    f"Use -C <path> or /cd to choose a different workspace.")
+
     try:
         models = client.list_models()
     except OllamaError as e:

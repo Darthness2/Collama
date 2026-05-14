@@ -103,7 +103,57 @@ def t_write_file(args: dict, ctx: ToolContext) -> str:
     return f"OK: wrote {path} ({'overwrote' if existed else 'created'}, +{adds} -{dels} lines)"
 
 
+def _norm_eol(s: str) -> str:
+    return s.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _fuzzy_span(text: str, old: str):
+    """Locate `old` in `text` tolerating per-line trailing-whitespace and
+    blank-line drift (the #1 cause of edit_file misses). Returns a unique
+    (start_line, end_line) into text.split('\\n'), or None if 0 / ambiguous.
+    """
+    text_lines = text.split("\n")
+    old_lines = old.split("\n")
+    while len(old_lines) > 1 and old_lines[-1] == "":
+        old_lines = old_lines[:-1]
+    while len(old_lines) > 1 and old_lines[0] == "":
+        old_lines = old_lines[1:]
+    n = len(old_lines)
+    if n == 0:
+        return None
+    norm_old = [ln.rstrip() for ln in old_lines]
+    hits = [
+        i for i in range(len(text_lines) - n + 1)
+        if [ln.rstrip() for ln in text_lines[i:i + n]] == norm_old
+    ]
+    return (hits[0], hits[0] + n) if len(hits) == 1 else None
+
+
+def _closest_region(text: str, old: str) -> str:
+    """Show the file region most similar to `old`'s first non-blank line so
+    the model can self-correct after a failed match."""
+    import difflib
+    first = ""
+    for ln in old.split("\n"):
+        if ln.strip():
+            first = ln.strip()
+            break
+    if not first:
+        return ""
+    text_lines = text.split("\n")
+    best_i, best = 0, 0.0
+    for i, ln in enumerate(text_lines):
+        score = difflib.SequenceMatcher(None, ln.strip(), first).ratio()
+        if score > best:
+            best, best_i = score, i
+    if best < 0.4:
+        return ""
+    lo, hi = max(0, best_i - 2), min(len(text_lines), best_i + 6)
+    return "\n".join(f"{j + 1:>5}  {text_lines[j]}" for j in range(lo, hi))
+
+
 def t_edit_file(args: dict, ctx: ToolContext) -> str:
+    from . import diff as _diff
     path = args["path"]
     old = args["old_string"]
     new = args["new_string"]
@@ -111,22 +161,57 @@ def t_edit_file(args: dict, ctx: ToolContext) -> str:
     p = _resolve(path, ctx.root)
     if not p.exists():
         return f"ERROR: file not found: {path}"
-    text = p.read_text(errors="replace")
-    count = text.count(old)
-    if count == 0:
-        return "ERROR: old_string not found"
-    if count > 1 and not replace_all:
+    raw = p.read_text(errors="replace")
+
+    # 1. Exact match on the raw file — byte-perfect, preserves everything.
+    count = raw.count(old)
+    if count == 1 or (count > 1 and replace_all):
+        if not ctx.confirm("file edit", f"{path}: replace {count} occurrence(s)"):
+            return "ERROR: user denied edit"
+        new_text = raw.replace(old, new) if replace_all else raw.replace(old, new, 1)
+        p.write_text(new_text)
+        rendered = _diff.render(raw, new_text, path)
+        if rendered:
+            print(rendered)
+        adds, dels = _diff.stats(raw, new_text)
+        return f"OK: edited {path} ({count} replacement(s), +{adds} -{dels} lines)"
+    if count > 1:
         return f"ERROR: old_string matches {count} times — pass replace_all=true or supply more context"
-    if not ctx.confirm("file edit", f"{path}: replace {count} occurrence(s)"):
-        return "ERROR: user denied edit"
-    new_text = text.replace(old, new) if replace_all else text.replace(old, new, 1)
+
+    # 2. Recovery: normalize line endings + tolerate trailing-whitespace drift.
+    text = _norm_eol(raw)
+    old_n = _norm_eol(old)
+    new_n = _norm_eol(new)
+    if text.count(old_n) == 1:
+        if not ctx.confirm("file edit", f"{path}: replace 1 occurrence (line-ending normalized)"):
+            return "ERROR: user denied edit"
+        new_text = text.replace(old_n, new_n, 1)
+    else:
+        span = _fuzzy_span(text, old_n)
+        if span is None:
+            lines = len(text.splitlines())
+            msg = (
+                f"ERROR: old_string not found in {path} (file has {lines} lines). "
+                f"old_string must match the file EXACTLY, including indentation and "
+                f"whitespace. Re-read the file with read_file and copy the exact text, "
+                f"or use write_file to replace the whole file."
+            )
+            hint = _closest_region(text, old_n)
+            if hint:
+                msg += f"\n\nClosest region in the file:\n{hint}"
+            return msg
+        i, j = span
+        if not ctx.confirm("file edit", f"{path}: replace lines {i + 1}-{j} (whitespace-tolerant match)"):
+            return "ERROR: user denied edit"
+        file_lines = text.split("\n")
+        new_text = "\n".join(file_lines[:i] + new_n.split("\n") + file_lines[j:])
+
     p.write_text(new_text)
-    from . import diff as _diff
     rendered = _diff.render(text, new_text, path)
     if rendered:
         print(rendered)
     adds, dels = _diff.stats(text, new_text)
-    return f"OK: edited {path} ({count} replacement(s), +{adds} -{dels} lines)"
+    return f"OK: edited {path} (+{adds} -{dels} lines, recovered via fuzzy match)"
 
 
 def t_list_dir(args: dict, ctx: ToolContext) -> str:
