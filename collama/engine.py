@@ -512,13 +512,24 @@ class QueryEngine:
             try:
                 msg, usage = self._chat_once(yield_deltas=self.stream)
                 if isinstance(msg, _StreamGen):
-                    # streaming generator: run it, collecting deltas as events
+                    # streaming generator: spinner runs during prompt-eval
+                    # (no tokens yet), then stops the instant the first token
+                    # arrives so the user sees generation happening live.
                     final_msg = None
-                    for kind, payload in msg.iter():
-                        if kind == "delta":
-                            yield Message("delta", {"text": payload})
-                        elif kind == "done":
-                            final_msg = payload
+                    spinner = ui.Spinner("thinking")
+                    spinner.start()
+                    got_first = False
+                    try:
+                        for kind, payload in msg.iter():
+                            if kind == "delta":
+                                if not got_first:
+                                    spinner.stop()
+                                    got_first = True
+                                yield Message("delta", {"text": payload})
+                            elif kind == "done":
+                                final_msg = payload
+                    finally:
+                        spinner.stop()
                     if final_msg is None:
                         yield Message("error", {"text": "stream ended without 'done'"})
                         return

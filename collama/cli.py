@@ -514,7 +514,15 @@ def main(argv: list[str] | None = None) -> int:
 
     host = args.host or os.environ.get("OLLAMA_HOST") or cfg.get("host", "http://localhost:11434")
     cfg["host"] = host
-    client = OllamaClient(host=host)
+    # keep_alive keeps the model resident in VRAM between turns (avoids a
+    # cold disk->VRAM reload every turn); read_timeout is the max gap between
+    # streamed tokens, so long generations never hit a wall.
+    client = OllamaClient(
+        host=host,
+        connect_timeout=float(config.get_value(cfg, "ollama.connect_timeout", 15.0)),
+        read_timeout=float(config.get_value(cfg, "ollama.read_timeout", 600.0)),
+        keep_alive=config.get_value(cfg, "ollama.keep_alive", "30m"),
+    )
 
     model = args.model or os.environ.get("COLLAMA_MODEL") or cfg.get("model")
     if not model:

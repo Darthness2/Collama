@@ -7,6 +7,8 @@ REPL also does, just inlined here for backwards compatibility.
 """
 from __future__ import annotations
 
+import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterator, Optional
 
@@ -44,7 +46,7 @@ class Agent:
             temperature=temperature,
             config=config,
             permission_resolver=terminal_resolver,
-            stream=False,  # REPL keeps a single spinner; no in-line deltas
+            stream=True,  # stream tokens live so generation is visible
         )
         self.client = client
         self.on_turn_complete = on_turn_complete
@@ -95,33 +97,69 @@ class Agent:
 
     def turn(self, user_input: str) -> str:
         """Run a turn, rendering events to the terminal as they stream."""
-        final = ""
+        rs = _RenderState()
         for msg in self.engine.submit_message(user_input):
-            final = render_event(msg, final)
+            render_event(msg, rs)
         if self.on_turn_complete:
             try:
                 self.on_turn_complete(self)
             except Exception:
                 pass
-        return final
+        return rs.final_text
 
     def stream(self, user_input: str) -> Iterator[Message]:
         """Direct access to the event stream (skip terminal rendering)."""
         return self.engine.submit_message(user_input)
 
 
-def render_event(event: Message, final_text: str) -> str:
-    """Render a single QueryEngine event to the terminal. Returns updated final text."""
+@dataclass
+class _RenderState:
+    """Per-turn rendering bookkeeping passed through render_event."""
+    final_text: str = ""
+    streaming: bool = False        # currently mid-stream (deltas arriving)
+    streamed_any: bool = False     # streamed at least one delta this assistant msg
+
+
+def _end_stream_line(rs: _RenderState) -> None:
+    if rs.streaming:
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+        rs.streaming = False
+
+
+def render_event(event: Message, rs: _RenderState) -> None:
+    """Render a single QueryEngine event to the terminal, updating `rs`."""
     k, d = event.kind, event.data
+
+    # Any non-delta event ends an in-progress streamed line first.
+    if k != "delta":
+        _end_stream_line(rs)
+
     if k == "thinking":
         ui.thinking(d["text"])
     elif k == "plan":
         ui.plan(d["steps"])
     elif k == "narration":
         print(ui.color("  ▪ ", ui.TEAL_DIM) + ui.color(d["text"], ui.MUTED))
+    elif k == "delta":
+        # Live token stream — print raw as it arrives so the user sees the
+        # model actually generating (and the GPU working) instead of a
+        # blank wait followed by a dump.
+        if not rs.streaming:
+            sys.stdout.write(ui.color("  ● ", ui.TEAL_BRIGHT))
+            rs.streaming = True
+        sys.stdout.write(d["text"])
+        sys.stdout.flush()
+        rs.streamed_any = True
     elif k == "assistant":
-        ui.assistant(d["text"])
-        final_text = d["text"]
+        rs.final_text = d["text"]
+        # If we already streamed this answer token-by-token, don't re-print
+        # the whole panel — just finish the line. Otherwise (non-stream
+        # fallback) render the nice markdown panel.
+        if rs.streamed_any:
+            rs.streamed_any = False
+        else:
+            ui.assistant(d["text"])
     elif k == "tool_call":
         ui.tool_call(d["name"], d["summary"])
     elif k == "tool_result":
@@ -135,9 +173,6 @@ def render_event(event: Message, final_text: str) -> str:
         ui.info(f"context {strategy}: {d['before']} → {d['after']} approx tokens")
     elif k == "tool_denied":
         ui.warn(f"permission denied: {d['name']} ({d['reason']})")
-    elif k == "delta":
-        # SDK consumers can render incrementally; the REPL ignores deltas.
-        pass
     elif k == "done":
         usage = d.get("usage", {})
         if any(usage.values()):
@@ -146,4 +181,3 @@ def render_event(event: Message, final_text: str) -> str:
                 f"  · {usage.get('ms', 0)}ms",
                 ui.SOFT,
             ))
-    return final_text

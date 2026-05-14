@@ -24,9 +24,37 @@ class ToolsUnsupportedError(OllamaError):
 
 
 class OllamaClient:
-    def __init__(self, host: str = "http://localhost:11434", timeout: int = 600):
+    def __init__(
+        self,
+        host: str = "http://localhost:11434",
+        timeout: int = 600,
+        connect_timeout: float = 15.0,
+        read_timeout: float = 600.0,
+        keep_alive: str | int | None = "30m",
+    ):
+        """`timeout` is kept for back-compat. The meaningful knobs:
+
+        - connect_timeout: seconds to establish the TCP connection.
+        - read_timeout: for STREAMING calls this is the max gap *between
+          chunks*, NOT the whole-response budget — so a 30-minute
+          generation is fine as long as tokens keep arriving. For
+          non-streaming calls it's the whole-response budget.
+        - keep_alive: how long Ollama keeps the model resident in VRAM
+          after a request ('30m', '1h', 0 to unload immediately, -1 to
+          keep forever). Keeping it loaded avoids a cold disk->VRAM
+          reload on every turn.
+        """
         self.host = host.rstrip("/")
         self.timeout = timeout
+        self.connect_timeout = connect_timeout
+        # If the caller passed a custom `timeout` but left read_timeout at the
+        # default, honour the explicit `timeout`.
+        self.read_timeout = read_timeout if read_timeout != 600.0 else float(timeout)
+        self.keep_alive = keep_alive
+
+    def _apply_keep_alive(self, payload: dict) -> None:
+        if self.keep_alive is not None and "keep_alive" not in payload:
+            payload["keep_alive"] = self.keep_alive
 
     def list_models(self) -> list[str]:
         try:
@@ -53,11 +81,12 @@ class OllamaClient:
             payload["tools"] = tools
         if options:
             payload["options"] = options
+        self._apply_keep_alive(payload)
         try:
             r = requests.post(
                 f"{self.host}/api/chat",
                 json=payload,
-                timeout=self.timeout,
+                timeout=(self.connect_timeout, self.read_timeout),
             )
         except requests.RequestException as e:
             raise OllamaError(f"chat request failed: {e}") from e
@@ -91,11 +120,15 @@ class OllamaClient:
             payload["tools"] = tools
         if options:
             payload["options"] = options
+        self._apply_keep_alive(payload)
         try:
             with requests.post(
                 f"{self.host}/api/chat",
                 json=payload,
-                timeout=self.timeout,
+                # (connect, read): the read timeout is the max gap BETWEEN
+                # streamed chunks — not the whole-response budget. As long as
+                # tokens keep flowing, a long generation never times out.
+                timeout=(self.connect_timeout, self.read_timeout),
                 stream=True,
             ) as r:
                 if r.status_code != 200:
