@@ -1002,7 +1002,6 @@ def t_skill(args: dict, ctx: ToolContext) -> str:
     rest of the session. Skills live at ~/.config/collama/skills/<name>.md
     (or .txt). The contents become a system-prompt addendum.
     """
-    import os as _os
     from .config import config_dir
     op = args.get("op", "use")
     name = args.get("name", "")

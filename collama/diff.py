@@ -64,7 +64,3 @@ def stats(old: str, new: str) -> tuple[int, int]:
         elif tag == "insert":
             adds += j2 - j1
     return adds, dels
-
-
-def stats_line(adds: int, dels: int) -> str:
-    return ui.color(f"+{adds}", ui.GREEN) + " " + ui.color(f"-{dels}", ui.RED)

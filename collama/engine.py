@@ -53,11 +53,7 @@ from .background import BackgroundExecutor
 from .config import set_value
 from .ollama_client import OllamaClient, OllamaError, ToolsUnsupportedError
 from .permissions import CONCURRENT_SAFE, Resolver, auto_deny_resolver, can_use_tool
-from .services.compact import (
-    BOUNDARY_MARKER,
-    CompactReport,
-    manage_context,
-)
+from .services.compact import BOUNDARY_MARKER, manage_context
 from .services.transcript import record as record_transcript
 from .state import AppState
 from .tasks import TaskGraph, TaskKind, new_id

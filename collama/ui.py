@@ -54,16 +54,17 @@ MAGENTA = "\033[35m"
 CYAN = "\033[36m"
 GRAY = "\033[90m"
 
-# Teal palette (256-color codes — degrade gracefully if unsupported).
-TEAL = "\033[38;5;43m"          # main accent
-TEAL_BRIGHT = "\033[38;5;49m"   # highlights
-TEAL_DIM = "\033[38;5;30m"      # subtle borders
-SURFACE = "\033[38;5;252m"      # body text
-MUTED = "\033[38;5;245m"        # secondary
-SOFT = "\033[38;5;240m"         # very muted
-WARN = "\033[38;5;215m"         # soft amber
-ERR = "\033[38;5;203m"          # soft coral
-OK = "\033[38;5;78m"            # mint
+# Palette — calm, cohesive 256-color set (degrades gracefully if unsupported).
+# Names are kept stable so the rest of the codebase doesn't need to change.
+TEAL        = "\033[38;5;73m"    # muted teal — primary accent
+TEAL_BRIGHT = "\033[38;5;80m"    # bright cyan — highlights, prompt, logo
+TEAL_DIM    = "\033[38;5;23m"    # dark teal — borders, rules
+SURFACE     = "\033[38;5;253m"   # near-white — body text
+MUTED       = "\033[38;5;246m"   # grey — secondary text
+SOFT        = "\033[38;5;240m"   # faint grey — timers, hints, rules
+WARN        = "\033[38;5;180m"   # warm sand — warnings
+ERR         = "\033[38;5;174m"   # dusty rose — errors
+OK          = "\033[38;5;108m"   # sage green — success marks
 
 
 def _supports_color() -> bool:
@@ -389,15 +390,22 @@ def error(msg: str) -> None:
 
 
 def assistant(msg: str) -> None:
-    """Render a final assistant answer in a soft panel, with markdown styling."""
-    panel(msg, title="answer", style="round", color_c=TEAL_DIM, title_c=TEAL_BRIGHT,
-          markdown=True)
+    """Print the assistant's answer as clean indented text — markdown-styled,
+    no box. (Streaming answers are already shown live; this is the
+    non-streaming render and the /resume replay.)"""
+    rendered = render_markdown(msg)
+    lines = _wrap_visible(rendered, max(20, width() - 4))
+    for i, line in enumerate(lines or [""]):
+        prefix = color("  ● ", TEAL_BRIGHT) if i == 0 else "    "
+        print(prefix + line)
 
 
 def thinking(msg: str) -> None:
-    """Render <think>…</think> content dim-italic in a panel, with markdown."""
-    panel(msg, title="thinking", style="round", color_c=SOFT, title_c=MUTED,
-          markdown=True)
+    """Print <think>…</think> content as faint italic indented text — no box."""
+    lines = _wrap_visible(msg, max(20, width() - 4))
+    for i, line in enumerate(lines or [""]):
+        prefix = color("  ◦ ", SOFT) if i == 0 else "    "
+        print(prefix + color(line, SOFT + ITALIC))
 
 
 def plan(items: list[str]) -> None:

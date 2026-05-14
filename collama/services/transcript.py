@@ -39,20 +39,3 @@ def record(session_id: str, role: str, content: Any, **extra) -> None:
             f.write(json.dumps(line, ensure_ascii=False) + "\n")
     except OSError:
         pass
-
-
-def load(session_id: str) -> list[dict]:
-    p = transcript_path(session_id)
-    if not p.exists():
-        return []
-    out: list[dict] = []
-    with p.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                out.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return out

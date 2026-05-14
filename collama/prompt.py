@@ -5,8 +5,6 @@ Falls back to readline tab-completion, then plain input().
 """
 from __future__ import annotations
 
-from typing import Callable
-
 # (name, hint) pairs shown in the popup.
 SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/help", "show available commands"),
