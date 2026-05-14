@@ -539,17 +539,32 @@ class QueryEngine:
                                 yield Message("delta", {"text": payload})
                             elif kind == "done":
                                 final_msg = payload
+                    except OllamaError as e:
+                        # The chunked stream broke mid-response (common behind
+                        # proxies that mangle chunked transfers). Fall back to
+                        # a single non-streaming request for this turn.
+                        spinner.stop()
+                        yield Message("warn", {
+                            "text": f"streaming connection broke ({e}); retrying without streaming."
+                        })
+                        msg = self._chat_nonstream()
+                        if msg is None:
+                            yield Message("error", {"text": "non-streaming retry also failed"})
+                            return
+                        usage = {}
+                        final_msg = "RETRIED"  # sentinel: msg is already the message dict
                     finally:
                         spinner.stop()
                     if final_msg is None:
                         yield Message("error", {"text": "stream ended without 'done'"})
                         return
-                    msg = final_msg["message"]
-                    usage = {
-                        "input": final_msg.get("prompt_eval_count", 0),
-                        "output": final_msg.get("eval_count", 0),
-                        "ms": final_msg.get("total_duration_ns", 0) // 1_000_000,
-                    }
+                    if final_msg != "RETRIED":
+                        msg = final_msg["message"]
+                        usage = {
+                            "input": final_msg.get("prompt_eval_count", 0),
+                            "output": final_msg.get("eval_count", 0),
+                            "ms": final_msg.get("total_duration_ns", 0) // 1_000_000,
+                        }
             except ToolsUnsupportedError:
                 yield Message("warn", {"text": f"model '{self.model}' lacks native tool support — switching to text-protocol fallback."})
                 self.state.update(tools_enabled=False)
@@ -648,6 +663,22 @@ class QueryEngine:
             )
         # Non-streaming endpoint doesn't expose usage in our wrapper today.
         return msg, {}
+
+    def _chat_nonstream(self) -> dict | None:
+        """Single non-streaming request — used as a fallback when a streamed
+        response breaks mid-flight (chunk parse errors, proxy interference)."""
+        api_messages = normalize_messages_for_api(self.messages)
+        tools = all_tool_schemas() if self.state.tools_enabled else None
+        try:
+            with ui.Spinner("retrying (no stream)"):
+                return self.client.chat(
+                    model=self.model,
+                    messages=api_messages,
+                    tools=tools,
+                    options={"temperature": self.temperature},
+                )
+        except OllamaError:
+            return None
 
     def _summarize_with_model(self, middle: list[dict]) -> str | None:
         """Used by autoCompact to LLM-summarize older messages."""
