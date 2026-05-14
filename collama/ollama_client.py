@@ -165,18 +165,28 @@ class OllamaClient:
             }
         """
         full = ""
+        # Tool calls can arrive in ANY chunk — not necessarily the final
+        # `done` one. Accumulate them across the whole stream; reading only
+        # the done chunk silently drops calls and the turn renders nothing.
+        tool_calls: list[dict] = []
+        role = "assistant"
         for chunk in self.chat_stream(model, messages, tools, options):
             msg = chunk.get("message") or {}
+            if msg.get("role"):
+                role = msg["role"]
             delta = msg.get("content") or ""
             if delta:
                 full += delta
                 yield ("delta", delta)
+            tc = msg.get("tool_calls")
+            if tc:
+                tool_calls.extend(tc)
             if chunk.get("done"):
                 yield ("done", {
                     "message": {
-                        "role": msg.get("role", "assistant"),
+                        "role": role,
                         "content": full,
-                        "tool_calls": msg.get("tool_calls") or [],
+                        "tool_calls": tool_calls,
                     },
                     "eval_count": int(chunk.get("eval_count") or 0),
                     "prompt_eval_count": int(chunk.get("prompt_eval_count") or 0),
