@@ -160,8 +160,14 @@ def repl(agent: Agent, cfg: dict) -> int:
     prompt = Prompt()
     while True:
         ui.prepare_for_input()
+        # The blank separator line must be printed SEPARATELY — never embed a
+        # newline in the prompt string. prompt_toolkit computes cursor/line
+        # position relative to the prompt; a '\n' inside it corrupts that
+        # math and causes glitches when editing/pasting (and misplaces the
+        # completion popup), especially on macOS terminals.
+        print()
         try:
-            line = prompt.ask(ui.color("\n❯ ", ui.TEAL_BRIGHT)).strip()
+            line = prompt.ask(ui.color("❯ ", ui.TEAL_BRIGHT)).strip()
         except (EOFError, KeyboardInterrupt):
             print()
             return 0
@@ -322,6 +328,9 @@ def repl(agent: Agent, cfg: dict) -> int:
                 ui.info(f"tools:    {'native' if agent.tools_enabled else 'text-protocol fallback'}")
                 ui.info(f"github:   {'logged in' if agent.ctx.github_token else 'no token'}")
                 ui.info(f"ssl:      {'INSECURE (verification off)' if agent.ctx.insecure_ssl else 'verify enabled'}")
+                ui.info(f"input:    {prompt.backend}"
+                        + ("" if prompt.backend == "prompt_toolkit"
+                           else "  (install prompt_toolkit for the / command popup)"))
                 continue
             if cmd == "insecure":
                 want = arg1.lower() if arg1 else ("off" if agent.ctx.insecure_ssl else "on")

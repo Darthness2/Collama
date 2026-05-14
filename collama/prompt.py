@@ -125,6 +125,17 @@ class Prompt:
         else:
             self._readline = False
 
+    @property
+    def backend(self) -> str:
+        """Which input backend is active: 'prompt_toolkit' gives the live
+        slash-command popup; 'readline' only does TAB completion; 'plain'
+        has neither (prompt_toolkit not installed)."""
+        if self._pt is not None:
+            return "prompt_toolkit"
+        if self._readline:
+            return "readline"
+        return "plain"
+
     def ask(self, prompt: str) -> str:
         if self._pt is not None:
             # prompt_toolkit has its own renderer; on Windows it treats raw
