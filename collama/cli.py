@@ -148,6 +148,45 @@ def _resolve_session_arg(arg: str, listed: list[dict]) -> dict | None:
     return None
 
 
+def _replay_conversation(messages: list[dict], max_turns: int = 12) -> None:
+    """Print a saved conversation's history so a resumed session has context.
+
+    Shows the last `max_turns` user turns (and the assistant/tool activity
+    between them); older history is summarized as a one-line marker.
+    """
+    convo = [m for m in messages if m.get("role") != "system"]
+    if not convo:
+        ui.info("(empty conversation)")
+        return
+
+    # Find where to start: keep the tail with at most `max_turns` user msgs.
+    user_idxs = [i for i, m in enumerate(convo) if m.get("role") == "user"]
+    start = 0
+    if len(user_idxs) > max_turns:
+        start = user_idxs[-max_turns]
+        ui.info(f"… {user_idxs.index(user_idxs[-max_turns])} earlier turn(s) hidden")
+
+    ui.hr()
+    for m in convo[start:]:
+        role = m.get("role")
+        content = (m.get("content") or "").strip()
+        if role == "user":
+            # Skip our own injected tool-result / background frames.
+            if content.startswith(("Tool result for ", "[background] ", "[older context")):
+                continue
+            print(ui.color("❯ ", ui.TEAL_BRIGHT) + ui.color(content, ui.SURFACE))
+        elif role == "assistant":
+            if content:
+                ui.assistant(content)
+            for tc in m.get("tool_calls") or []:
+                fn = tc.get("function", {}) or {}
+                print(ui.color("  ▸ ", ui.TEAL_BRIGHT) + ui.color(fn.get("name", "?"), ui.TEAL_BRIGHT))
+        elif role == "tool":
+            first = content.splitlines()[0][:120] if content else ""
+            ui.tool_result(first, ok=not first.startswith("ERROR"))
+    ui.hr()
+
+
 def repl(agent: Agent, cfg: dict) -> int:
     ui.banner(agent.model, str(agent.ctx.root), tools_enabled=agent.tools_enabled)
 
@@ -465,10 +504,12 @@ def repl(agent: Agent, cfg: dict) -> int:
                 session.clear()
                 session.update(data)
                 agent.model = data.get("model") or agent.model
-                agent.load_messages(data.get("messages", []))
+                saved_messages = data.get("messages", [])
+                agent.load_messages(saved_messages)
                 agent.on_turn_complete = lambda a: _autosave(session, a)
                 agent.engine.session_id = session["id"]
                 ui.info(f"resumed {session['id']} — {session.get('title', '')}")
+                _replay_conversation(saved_messages)
                 continue
             if cmd == "sessions":
                 _print_sessions(active_id=session.get("id"))

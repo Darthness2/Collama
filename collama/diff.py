@@ -6,26 +6,32 @@ import difflib
 from . import ui
 
 
-def render(old: str, new: str, path: str, context: int = 3, max_lines: int = 200) -> str:
-    """Return a colored unified-diff string. Empty if nothing changed."""
+# Keep file-edit diffs short in the terminal — show a preview and cut off.
+DEFAULT_MAX_LINES = 12
+
+
+def render(old: str, new: str, path: str, context: int = 3,
+           max_lines: int = DEFAULT_MAX_LINES) -> str:
+    """Return a colored unified-diff string, truncated to `max_lines`.
+
+    Empty if nothing changed. When the diff is longer than `max_lines`, the
+    preview is cut off and a '… +N more lines' marker is appended so you can
+    see something changed without flooding the terminal.
+    """
     old_lines = old.splitlines(keepends=False)
     new_lines = new.splitlines(keepends=False)
     if old == new:
         return ""
 
-    diff = difflib.unified_diff(
+    diff_lines = list(difflib.unified_diff(
         old_lines, new_lines,
         fromfile=f"a/{path}", tofile=f"b/{path}",
         n=context, lineterm="",
-    )
+    ))
 
     out = []
-    count = 0
-    for line in diff:
-        count += 1
-        if count > max_lines:
-            out.append(ui.color(f"  …diff truncated after {max_lines} lines", ui.GRAY))
-            break
+    shown = diff_lines[:max_lines]
+    for line in shown:
         if line.startswith("+++") or line.startswith("---"):
             out.append(ui.color(line, ui.BOLD))
         elif line.startswith("@@"):
@@ -36,6 +42,10 @@ def render(old: str, new: str, path: str, context: int = 3, max_lines: int = 200
             out.append(ui.color(line, ui.RED))
         else:
             out.append(ui.color(line, ui.GRAY))
+
+    remaining = len(diff_lines) - len(shown)
+    if remaining > 0:
+        out.append(ui.color(f"  … +{remaining} more diff line(s) (truncated)", ui.GRAY))
     return "\n".join(out)
 
 
