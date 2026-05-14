@@ -54,6 +54,7 @@ Slash commands:
   /logout github          remove the saved GitHub token
   /whoami                 show authenticated GitHub user
   /clear                  reset conversation history (does not delete saved session)
+  /retry                  re-run your last message (handy after a bad turn)
   /new [title]            start a new conversation
   /resume [id|number]     list saved conversations or resume one
   /sessions               list saved conversations
@@ -199,6 +200,7 @@ def repl(agent: Agent, cfg: dict) -> int:
     prompt = Prompt()
     if prompt.status_note:
         ui.warn(prompt.status_note)
+    last_user_input = ""
     while True:
         ui.prepare_for_input()
         # The blank separator line must be printed SEPARATELY — never embed a
@@ -542,9 +544,18 @@ def repl(agent: Agent, cfg: dict) -> int:
                 config.save(cfg)
                 ui.info(f"yolo: {'ON' if agent.ctx.yolo else 'OFF'}")
                 continue
-            ui.warn(f"unknown command: /{cmd}")
-            continue
+            if cmd == "retry":
+                if not last_user_input:
+                    ui.warn("nothing to retry yet")
+                    continue
+                ui.info(f"retrying: {last_user_input[:80]}")
+                line = last_user_input
+                # fall through to the turn dispatch below
+            else:
+                ui.warn(f"unknown command: /{cmd}")
+                continue
 
+        last_user_input = line
         try:
             agent.turn(line)
         except KeyboardInterrupt:

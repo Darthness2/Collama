@@ -279,6 +279,21 @@ Operating principles:
 - Prefer edit_file over write_file for existing files.
 - One step at a time: call a tool, observe, decide.
 - Wrap private reasoning in <think>...</think>.
+
+Debugging discipline — when a command fails or code misbehaves:
+1. READ THE ACTUAL ERROR. run_bash marks results PASS/FAIL and, on
+   failure, appends a '↳ ...' hint with the error type and the most
+   likely file:line. Trust that location.
+2. OPEN THE EXACT SITE. read_file that file around the reported line
+   before changing anything. Never patch a file you haven't just read.
+3. FIND THE ROOT CAUSE, not a symptom. State your hypothesis in one
+   line, then make the smallest fix that addresses it. Don't scatter
+   speculative changes.
+4. VERIFY. After the fix, re-run the same command (or test) and
+   confirm it now reports PASS. If it still fails, the hypothesis was
+   wrong — re-read the new error, don't keep guessing.
+5. If you call the same tool with the same arguments and get the same
+   result twice, STOP repeating — change approach or ask the user.
 """
     if not tools_enabled:
         base += """

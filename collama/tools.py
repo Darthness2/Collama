@@ -673,11 +673,16 @@ def t_powershell(args: dict, ctx: ToolContext) -> str:
         )
     except subprocess.TimeoutExpired:
         return f"ERROR: timed out after {timeout}s"
-    parts = [f"exit code: {proc.returncode}"]
+    status = "PASS" if proc.returncode == 0 else "FAIL"
+    parts = [f"{status} (exit code {proc.returncode})"]
     if proc.stdout:
         parts.append(f"--- stdout ---\n{proc.stdout}")
     if proc.stderr:
         parts.append(f"--- stderr ---\n{proc.stderr}")
+    if proc.returncode != 0:
+        hint = _analyze_failure(proc.stdout, proc.stderr)
+        if hint:
+            parts.append(hint)
     return _truncate("\n".join(parts))
 
 
@@ -1066,6 +1071,42 @@ def t_tungsten(args: dict, ctx: ToolContext) -> str:
     return "ERROR: TungstenTool is a placeholder; not implemented in Collama."
 
 
+# Error-location patterns, most-specific first. Used to point the model
+# straight at the failing file:line when a command exits non-zero.
+import re as _re_err
+
+_ERR_LOC_PATTERNS = [
+    _re_err.compile(r'File "([^"]+)", line (\d+)'),          # Python traceback
+    _re_err.compile(r'-->\s+([^\s:]+):(\d+):\d+'),           # Rust
+    _re_err.compile(r'\(([^()\s]+):(\d+):\d+\)'),            # Node "at (file:line:col)"
+    _re_err.compile(r'([\w./\\+-]+\.\w+):(\d+):\d+'),        # tsc / gcc / go / eslint
+    _re_err.compile(r'([\w./\\+-]+\.\w+):(\d+)\b'),          # generic file:line
+]
+_ERR_MSG_RX = _re_err.compile(
+    r'^\s*([A-Z]\w*(?:Error|Exception|Warning|Fault)): ?(.*)$', _re_err.M
+)
+
+
+def _analyze_failure(stdout: str, stderr: str) -> str:
+    """Scan failed-command output for an error message + file:line so the
+    model can jump straight to the bug. Returns a one-line hint or ''."""
+    blob = (stderr or "") + "\n" + (stdout or "")
+    hints: list[str] = []
+    msgs = _ERR_MSG_RX.findall(blob)
+    if msgs:
+        kind, detail = msgs[-1]
+        hints.append(f"{kind}: {detail.strip()[:200]}")
+    loc = None
+    for pat in _ERR_LOC_PATTERNS:
+        found = pat.findall(blob)
+        if found:
+            loc = found[-1]  # last match = deepest / actual error frame
+            break
+    if loc:
+        hints.append(f"likely at {loc[0]}:{loc[1]}")
+    return ("  ↳ " + "  ·  ".join(hints)) if hints else ""
+
+
 def t_run_bash(args: dict, ctx: ToolContext) -> str:
     cmd = args["command"]
     timeout = int(args.get("timeout", 60))
@@ -1078,14 +1119,19 @@ def t_run_bash(args: dict, ctx: ToolContext) -> str:
                 capture_output=True, text=True, timeout=timeout,
             )
     except subprocess.TimeoutExpired:
-        return f"ERROR: timed out after {timeout}s"
+        return f"ERROR: timed out after {timeout}s — the command was still running."
     out = proc.stdout
     err = proc.stderr
-    parts = [f"exit code: {proc.returncode}"]
+    status = "PASS" if proc.returncode == 0 else "FAIL"
+    parts = [f"{status} (exit code {proc.returncode})"]
     if out:
         parts.append(f"--- stdout ---\n{out}")
     if err:
         parts.append(f"--- stderr ---\n{err}")
+    if proc.returncode != 0:
+        hint = _analyze_failure(out, err)
+        if hint:
+            parts.append(hint)
     return _truncate("\n".join(parts))
 
 

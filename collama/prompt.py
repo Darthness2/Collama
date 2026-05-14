@@ -31,6 +31,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/logout", "/logout github"),
     ("/whoami", "show authenticated GitHub user"),
     ("/clear", "reset conversation history"),
+    ("/retry", "re-run your last message"),
     ("/new", "start a new conversation"),
     ("/resume", "list/resume saved conversations"),
     ("/sessions", "list saved conversations"),
