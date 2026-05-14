@@ -599,7 +599,11 @@ class QueryEngine:
                 })
                 return
 
-            if narration:
+            # In streaming mode the narration was ALREADY shown live as delta
+            # tokens — emitting it again as a narration event double-prints it
+            # ('● ...' then '▪ ...'). Only emit the narration event for the
+            # non-streaming path, which has no deltas.
+            if narration and not self.stream:
                 yield Message("narration", {"text": narration})
 
             yield from self._execute_and_record(calls)
