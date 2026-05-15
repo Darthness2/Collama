@@ -220,6 +220,8 @@ def render_event(event: Message, rs: _RenderState) -> None:
                 )
                 return
         ui.tool_result(d["first_line"][:160], ok=d["ok"])
+    elif k == "info":
+        ui.info(d["text"])
     elif k == "warn":
         ui.warn(d["text"])
     elif k == "error":

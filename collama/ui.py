@@ -542,15 +542,35 @@ class Spinner:
     On stop, clears the line so the next print is clean.
     """
 
-    def __init__(self, label: str = "thinking", color_c: str = TEAL_BRIGHT) -> None:
+    def __init__(
+        self,
+        label: str = "thinking",
+        color_c: str = TEAL_BRIGHT,
+        escalations: list[tuple[float, str]] | None = None,
+    ) -> None:
+        """`escalations` is an optional list of (after_seconds, label) pairs
+        applied as time passes — used by the engine to tell the user WHY
+        the agent has been thinking for a while (large prompt, model loading,
+        etc.) instead of just sitting on the original label."""
         self.label = label
         self.color_c = color_c
+        # Sort ascending so the loop just picks the highest matching tier.
+        self.escalations = sorted(escalations or [], key=lambda x: x[0])
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._t0 = 0.0
 
     def set_label(self, label: str) -> None:
         self.label = label
+
+    def _current_label(self, elapsed: float) -> str:
+        label = self.label
+        for after, lbl in self.escalations:
+            if elapsed >= after:
+                label = lbl
+            else:
+                break
+        return label
 
     def start(self) -> None:
         if not sys.stdout.isatty() or self._thread is not None:
@@ -587,7 +607,7 @@ class Spinner:
                 "  "
                 + color(frame, self.color_c)
                 + " "
-                + color(self.label + "…", MUTED)
+                + color(self._current_label(elapsed) + "…", MUTED)
                 + "  "
                 + color(timer, SOFT)
             )
