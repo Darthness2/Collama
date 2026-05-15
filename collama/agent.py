@@ -139,13 +139,22 @@ class _RenderState:
     final_text: str = ""
     streaming: bool = False        # currently mid-stream (deltas arriving)
     streamed_any: bool = False     # streamed at least one delta this assistant msg
+    md: object | None = None       # ui.StreamMarkdown when streaming
 
 
 def _end_stream_line(rs: _RenderState) -> None:
     if rs.streaming:
+        if rs.md is not None:
+            rs.md.flush()  # type: ignore[attr-defined]
         sys.stdout.write("\n")
         sys.stdout.flush()
         rs.streaming = False
+        rs.md = None
+
+
+def _stream_emit(s: str) -> None:
+    sys.stdout.write(s)
+    sys.stdout.flush()
 
 
 def render_event(event: Message, rs: _RenderState) -> None:
@@ -163,14 +172,17 @@ def render_event(event: Message, rs: _RenderState) -> None:
     elif k == "narration":
         print(ui.color("  ▪ ", ui.TEAL_DIM) + ui.color(d["text"], ui.MUTED))
     elif k == "delta":
-        # Live token stream — print raw as it arrives so the user sees the
-        # model actually generating (and the GPU working) instead of a
-        # blank wait followed by a dump.
+        # Live token stream — buffer per-line and render markdown so **bold**,
+        # *italic*, `code`, and # headers come out styled instead of as
+        # literal characters.
         if not rs.streaming:
-            sys.stdout.write(ui.color("  ● ", ui.TEAL_BRIGHT))
+            rs.md = ui.StreamMarkdown(
+                emit=_stream_emit,
+                first_prefix=ui.color("  ● ", ui.TEAL_BRIGHT),
+                cont_prefix="    ",
+            )
             rs.streaming = True
-        sys.stdout.write(d["text"])
-        sys.stdout.flush()
+        rs.md.feed(d["text"])  # type: ignore[union-attr]
         rs.streamed_any = True
     elif k == "assistant":
         rs.final_text = d["text"]

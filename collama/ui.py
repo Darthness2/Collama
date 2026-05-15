@@ -196,6 +196,47 @@ def render_markdown(text: str) -> str:
     return out
 
 
+class StreamMarkdown:
+    """Render streamed tokens with markdown styling, line-by-line.
+
+    Streaming raw deltas leaves **bold**, *italic*, `code`, and `#` headers
+    visible as literal markers. We instead buffer incoming text until a
+    newline and pass each completed line through render_markdown() before
+    emitting it. Inline markers within a single line are styled correctly;
+    fenced code blocks keep their ``` markers (we don't have whole-block
+    context at stream time) but their inner lines still read cleanly.
+
+    `first_prefix` is prepended to the first emitted line, `cont_prefix` to
+    every line after that — so a streamed assistant turn shows '  ● ' on
+    the opener and '    ' indent on continuations.
+    """
+
+    def __init__(self, emit, first_prefix: str = "", cont_prefix: str = ""):
+        self.emit = emit
+        self.first_prefix = first_prefix
+        self.cont_prefix = cont_prefix
+        self.buf = ""
+        self.opened = False
+
+    def _emit_line(self, line: str, terminator: str) -> None:
+        prefix = self.first_prefix if not self.opened else self.cont_prefix
+        self.opened = True
+        self.emit(prefix + render_markdown(line) + terminator)
+
+    def feed(self, text: str) -> None:
+        if not text:
+            return
+        self.buf += text
+        while "\n" in self.buf:
+            line, self.buf = self.buf.split("\n", 1)
+            self._emit_line(line, "\n")
+
+    def flush(self) -> None:
+        if self.buf:
+            self._emit_line(self.buf, "")
+            self.buf = ""
+
+
 def _wrap_visible(text: str, width: int) -> list[str]:
     """Wrap `text` to `width` *visible* columns, leaving ANSI escapes intact."""
     out: list[str] = []
