@@ -61,6 +61,11 @@ class AppState:
     # capped at MAX_EDIT_HISTORY entries (oldest dropped).
     edit_history: list[dict] = field(default_factory=list)
 
+    # Per-turn map of {absolute_path: failed_edit_count}. Reset by the engine
+    # each turn. After 2 failures on the same file the error escalates and
+    # tells the model to switch to write_file.
+    edit_fails: dict = field(default_factory=dict)
+
     # per-model facts learned at runtime (e.g. tools_supported)
     models: dict[str, dict] = field(default_factory=dict)
 

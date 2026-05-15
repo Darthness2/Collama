@@ -203,6 +203,22 @@ def _closest_region(text: str, old: str) -> str:
     return "\n".join(f"{j + 1:>5}  {text_lines[j]}" for j in range(lo, hi))
 
 
+def _read_text_robust(p: Path) -> str:
+    """Read a text file tolerating BOM and Windows code pages.
+
+    Tries UTF-8 (including BOM) first, then falls back to the platform
+    default. Strips a leading BOM if present so byte-for-byte comparison
+    against `old_string` from a model (which won't include the BOM) works.
+    """
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except (UnicodeDecodeError, OSError):
+        text = p.read_text(errors="replace")
+    if text and text[0] == "﻿":
+        text = text[1:]
+    return text
+
+
 def t_edit_file(args: dict, ctx: ToolContext) -> str:
     from . import diff as _diff
     path = args["path"]
@@ -212,7 +228,7 @@ def t_edit_file(args: dict, ctx: ToolContext) -> str:
     p = _resolve(path, ctx.root)
     if not p.exists():
         return f"ERROR: file not found: {path}"
-    raw = p.read_text(errors="replace")
+    raw = _read_text_robust(p)
 
     # 1. Exact match on the raw file — byte-perfect, preserves everything.
     count = raw.count(old)
@@ -242,15 +258,36 @@ def t_edit_file(args: dict, ctx: ToolContext) -> str:
         span = _fuzzy_span(text, old_n)
         if span is None:
             lines = len(text.splitlines())
+            # Count consecutive failures on this path this turn — after the
+            # second one, escalate hard: keep retrying edit_file won't work,
+            # the model needs to switch strategy to write_file.
+            state = getattr(ctx, "state", None)
+            fail_count = 1
+            if state is not None:
+                fails = dict(getattr(state, "edit_fails", {}) or {})
+                rp = str(p.resolve())
+                fails[rp] = fails.get(rp, 0) + 1
+                fail_count = fails[rp]
+                state.update(edit_fails=fails)
             msg = (
                 f"ERROR: old_string not found in {path} (file has {lines} lines). "
                 f"old_string must match the file EXACTLY, including indentation and "
-                f"whitespace. Re-read the file with read_file and copy the exact text, "
-                f"or use write_file to replace the whole file."
+                f"whitespace."
             )
             hint = _closest_region(text, old_n)
             if hint:
-                msg += f"\n\nClosest region in the file:\n{hint}"
+                msg += f"\n\nClosest region in the file (copy from here, NOT from memory):\n{hint}"
+            if fail_count >= 2:
+                msg += (
+                    f"\n\nESCALATE: this is failure #{fail_count} on {path}. STOP using "
+                    f"edit_file on this file. Switch to write_file: read the full file, "
+                    f"build the complete new content, and write it back in one call."
+                )
+            else:
+                msg += (
+                    f"\n\nIf this fails again, give up on edit_file for this file and "
+                    f"call write_file with the complete new contents."
+                )
             return msg
         i, j = span
         if not ctx.confirm("file edit", f"{path}: replace lines {i + 1}-{j} (whitespace-tolerant match)"):

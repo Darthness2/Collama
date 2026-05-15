@@ -199,17 +199,18 @@ def render_markdown(text: str) -> str:
 class StreamMarkdown:
     """Render streamed tokens with markdown styling, line-by-line.
 
-    Streaming raw deltas leaves **bold**, *italic*, `code`, and `#` headers
-    visible as literal markers. We instead buffer incoming text until a
-    newline and pass each completed line through render_markdown() before
-    emitting it. Inline markers within a single line are styled correctly;
-    fenced code blocks keep their ``` markers (we don't have whole-block
-    context at stream time) but their inner lines still read cleanly.
-
-    `first_prefix` is prepended to the first emitted line, `cont_prefix` to
-    every line after that — so a streamed assistant turn shows '  ● ' on
-    the opener and '    ' indent on continuations.
+    Also ELIDES <plan>...</plan> and <think>...</think> blocks from the
+    streamed output — the engine renders them separately as panels, so
+    showing them inline would print every plan/think twice. The blocks
+    are dropped from this stream but still reach the engine via the
+    accumulated message content.
     """
+
+    SUPPRESS_PAIRS = [
+        ("<plan>", "</plan>"),
+        ("<think>", "</think>"),
+        ("<thinking>", "</thinking>"),
+    ]
 
     def __init__(self, emit, first_prefix: str = "", cont_prefix: str = ""):
         self.emit = emit
@@ -217,24 +218,106 @@ class StreamMarkdown:
         self.cont_prefix = cont_prefix
         self.buf = ""
         self.opened = False
+        self.mid_line = False  # last emit had no newline; next emit is a continuation
+        self.suppress_until: str | None = None  # close marker if currently inside a block
+        self._max_open = max(len(o) for o, _ in self.SUPPRESS_PAIRS)
 
     def _emit_line(self, line: str, terminator: str) -> None:
-        prefix = self.first_prefix if not self.opened else self.cont_prefix
+        if self.mid_line:
+            prefix = ""        # continuing the same visible line — no new prefix
+        elif not self.opened:
+            prefix = self.first_prefix
+        else:
+            prefix = self.cont_prefix
         self.opened = True
         self.emit(prefix + render_markdown(line) + terminator)
+        self.mid_line = (terminator == "")
 
     def feed(self, text: str) -> None:
         if not text:
             return
         self.buf += text
-        while "\n" in self.buf:
-            line, self.buf = self.buf.split("\n", 1)
-            self._emit_line(line, "\n")
+        self._drain(final=False)
 
     def flush(self) -> None:
-        if self.buf:
+        self._drain(final=True)
+        if self.buf and not self.suppress_until:
             self._emit_line(self.buf, "")
-            self.buf = ""
+        self.buf = ""
+
+    def _drain(self, *, final: bool) -> None:
+        # Loop until no more progress can be made on the buffer.
+        while True:
+            if self.suppress_until:
+                close = self.suppress_until
+                idx = self.buf.find(close)
+                if idx < 0:
+                    # Close not in buffer yet; keep a short tail in case the
+                    # close marker is split across chunks.
+                    keep = len(close) - 1
+                    if final:
+                        self.buf = ""
+                        self.suppress_until = None
+                        return
+                    if len(self.buf) > keep:
+                        self.buf = self.buf[-keep:]
+                    return
+                # Found close — drop everything up to and including it.
+                self.buf = self.buf[idx + len(close):]
+                self.suppress_until = None
+                continue
+
+            # Not suppressing — look for the earliest open marker in the buf.
+            earliest = -1
+            earliest_close: str | None = None
+            earliest_open_len = 0
+            for o, c in self.SUPPRESS_PAIRS:
+                i = self.buf.find(o)
+                if i >= 0 and (earliest < 0 or i < earliest):
+                    earliest = i
+                    earliest_close = c
+                    earliest_open_len = len(o)
+
+            if earliest >= 0:
+                # Emit text before the marker, then start suppressing.
+                before = self.buf[:earliest]
+                self.buf = self.buf[earliest + earliest_open_len:]
+                self.suppress_until = earliest_close
+                if before:
+                    parts = before.split("\n")
+                    for line in parts[:-1]:
+                        self._emit_line(line, "\n")
+                    if parts[-1]:
+                        self._emit_line(parts[-1], "")
+                continue
+
+            # No open marker; emit completed lines but hold a small tail to
+            # catch open markers split across feed() calls.
+            if "\n" in self.buf:
+                last_nl = self.buf.rfind("\n")
+                head = self.buf[:last_nl + 1]
+                self.buf = self.buf[last_nl + 1:]
+                for line in head.split("\n")[:-1]:
+                    self._emit_line(line, "\n")
+                continue
+
+            # Single line, no newline. Hold back enough chars to detect a
+            # partial open marker. On final flush, emit everything.
+            if final:
+                if self.buf:
+                    self._emit_line(self.buf, "")
+                    self.buf = ""
+                return
+            keep = self._max_open - 1
+            if len(self.buf) > keep:
+                # The prefix can't contain a complete open marker that hasn't
+                # been found above; safe to emit as a line continuation.
+                emit_now = self.buf[:-keep]
+                self.buf = self.buf[-keep:]
+                if emit_now:
+                    # Treat as a partial line (no newline yet).
+                    self._emit_line(emit_now, "")
+            return
 
 
 def _wrap_visible(text: str, width: int) -> list[str]:
