@@ -481,7 +481,7 @@ class StreamingToolExecutor:
         # Concurrent first: read tools that don't mutate.
         if len(concurrent_calls) > 1:
             with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
-                futures = [pool.submit(self._run_one, c) for c in concurrent_calls]
+                futures = [pool.submit(self._run_one_collect, c) for c in concurrent_calls]
                 for fut in as_completed(futures):
                     yield from fut.result()
         else:
@@ -491,24 +491,32 @@ class StreamingToolExecutor:
         for c in serial_calls:
             yield from self._run_one(c)
 
-    def _run_one(self, call: tuple[str, dict, str]) -> list[Message]:
+    def _run_one(self, call: tuple[str, dict, str]):
+        """Generator: yields tool_call IMMEDIATELY, runs dispatch with a live
+        spinner showing what's happening, then yields tool_result.
+
+        Yielding tool_call first means the '▸ name  summary' line appears the
+        moment the tool starts — not after it finishes — so you can see what
+        the agent is doing in real time. The spinner has a 150 ms grace
+        period so fast tools don't flash.
+        """
         name, args, role = call
-        events: list[Message] = []
         tid = new_id(TaskKind.BASH if name == "run_bash" else TaskKind.TOOL)
-        events.append(Message("tool_call", {
+        summary = _summarize_args(name, args)
+        yield Message("tool_call", {
             "id": tid, "name": name, "args": args, "role": role,
-            "summary": _summarize_args(name, args),
-        }, task_id=tid))
+            "summary": summary,
+        }, task_id=tid)
 
         allowed, reason = can_use_tool(name, args, self.state, self.resolver)
         if not allowed:
             err = f"ERROR: permission denied ({reason})"
-            events.append(Message("tool_denied", {"id": tid, "name": name, "reason": reason}, task_id=tid))
-            events.append(Message("tool_result", {
+            yield Message("tool_denied", {"id": tid, "name": name, "reason": reason}, task_id=tid)
+            yield Message("tool_result", {
                 "id": tid, "name": name, "result": err,
                 "ok": False, "first_line": err, "role": role,
-            }, task_id=tid))
-            return events
+            }, task_id=tid)
+            return
 
         ctx = ToolContext(
             **self.state.to_tool_ctx_kwargs(),
@@ -519,18 +527,30 @@ class StreamingToolExecutor:
             teams=self.teams,
             read_cache=getattr(self.engine, "_read_cache", None),
         )
-        try:
-            result = dispatch(name, args, ctx)
-        except Exception as e:
-            result = f"ERROR: {type(e).__name__}: {e}"
+
+        # Spinner labelled with what we're doing — appears only if dispatch
+        # takes long enough to matter (>150ms thanks to Spinner's initial wait).
+        # Tools with their own spinner (run_bash) just override the label.
+        spin_label = f"{name}  {summary[:60]}" if summary else name
+        with ui.Spinner(spin_label):
+            try:
+                result = dispatch(name, args, ctx)
+            except Exception as e:
+                result = f"ERROR: {type(e).__name__}: {e}"
+
         ok = not result.startswith("ERROR")
         first_line = result.splitlines()[0] if result else ""
-        events.append(Message("tool_result", {
+        yield Message("tool_result", {
             "id": tid, "name": name, "result": result,
             "ok": ok, "first_line": first_line, "role": role,
             "ctx_root": str(ctx.root),
-        }, task_id=tid))
-        return events
+        }, task_id=tid)
+
+    def _run_one_collect(self, call):
+        """List-returning variant for the ThreadPoolExecutor path — workers
+        can't safely yield across threads, so they materialize the events
+        and the main thread drains them in order."""
+        return list(self._run_one(call))
 
 
 # ---------------------------------------------------------------- engine ----

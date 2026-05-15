@@ -501,6 +501,10 @@ class Spinner:
         sys.stdout.flush()
 
     def _run(self) -> None:
+        # 150ms grace period — if the work finishes fast (most tool dispatches
+        # are sub-100ms), we never draw a frame and there's no visual flash.
+        if self._stop.wait(0.15):
+            return
         i = 0
         while not self._stop.is_set():
             frame = _SPIN_FRAMES[i % len(_SPIN_FRAMES)]

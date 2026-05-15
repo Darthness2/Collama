@@ -7,6 +7,30 @@ from typing import Any, Iterator
 import requests
 
 
+def _normalize_host(host: str) -> str:
+    """Make `host` into a valid Ollama base URL.
+
+    Accepts bare values like '0.0.0.0', 'localhost', 'localhost:11434',
+    'http://example' and rewrites them to include a scheme and (if missing)
+    Ollama's default port 11434. URLs that already include both — or a
+    custom path — are left alone.
+    """
+    from urllib.parse import urlparse, urlunparse
+
+    s = (host or "").strip().rstrip("/")
+    if not s:
+        return "http://localhost:11434"
+    if "://" not in s:
+        s = "http://" + s
+    p = urlparse(s)
+    # If no explicit port AND no path component, assume Ollama's default port.
+    if not p.port and not p.path:
+        hostname = p.hostname or ""
+        netloc = f"{hostname}:11434"
+        s = urlunparse((p.scheme, netloc, p.path, p.params, p.query, p.fragment))
+    return s
+
+
 def _looks_like_tools_error(body: str) -> bool:
     b = body.lower()
     return (
@@ -51,7 +75,7 @@ class OllamaClient:
         `timeout` is kept for back-compat: if you pass it and leave both
         read timeouts at their defaults, it overrides them both.
         """
-        self.host = host.rstrip("/")
+        self.host = _normalize_host(host)
         self.timeout = timeout
         self.connect_timeout = connect_timeout
         legacy_override = timeout != 600
