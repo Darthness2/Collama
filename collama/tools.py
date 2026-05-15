@@ -147,11 +147,8 @@ def t_write_file(args: dict, ctx: ToolContext) -> str:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content)
     _record_edit(ctx, p, old_text, content, "write")
-    rendered = _diff.render(old_text, content, path)
-    if rendered:
-        print(rendered)
     adds, dels = _diff.stats(old_text, content)
-    return f"OK: wrote {path} ({'overwrote' if existed else 'created'}, +{adds} -{dels} lines)"
+    return f"OK: wrote {path} +{adds} -{dels}"
 
 
 def _norm_eol(s: str) -> str:
@@ -238,11 +235,8 @@ def t_edit_file(args: dict, ctx: ToolContext) -> str:
         new_text = raw.replace(old, new) if replace_all else raw.replace(old, new, 1)
         p.write_text(new_text)
         _record_edit(ctx, p, raw, new_text, "edit")
-        rendered = _diff.render(raw, new_text, path)
-        if rendered:
-            print(rendered)
         adds, dels = _diff.stats(raw, new_text)
-        return f"OK: edited {path} ({count} replacement(s), +{adds} -{dels} lines)"
+        return f"OK: edited {path} +{adds} -{dels}"
     if count > 1:
         return f"ERROR: old_string matches {count} times — pass replace_all=true or supply more context"
 
@@ -297,11 +291,8 @@ def t_edit_file(args: dict, ctx: ToolContext) -> str:
 
     p.write_text(new_text)
     _record_edit(ctx, p, raw, new_text, "edit")
-    rendered = _diff.render(text, new_text, path)
-    if rendered:
-        print(rendered)
     adds, dels = _diff.stats(text, new_text)
-    return f"OK: edited {path} (+{adds} -{dels} lines, recovered via fuzzy match)"
+    return f"OK: edited {path} +{adds} -{dels}"
 
 
 def t_list_dir(args: dict, ctx: ToolContext) -> str:

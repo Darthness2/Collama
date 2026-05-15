@@ -196,6 +196,25 @@ def render_event(event: Message, rs: _RenderState) -> None:
     elif k == "tool_call":
         ui.tool_call(d["name"], d["summary"])
     elif k == "tool_result":
+        # Special-case file edits: show only the file + colored +adds/-dels,
+        # no inline diff. (The full diff is still available via /diff and
+        # /undo.) Format produced by t_write_file / t_edit_file is:
+        #   "OK: <op> <path> +N -M"
+        name = d.get("name") or ""
+        result = d.get("result") or ""
+        if d["ok"] and name in ("write_file", "edit_file"):
+            import re as _re_edit
+            m = _re_edit.match(r"OK:\s+(\w+)\s+(.+?)\s+\+(\d+)\s+-(\d+)\s*$", result)
+            if m:
+                op, path, adds, dels = m.group(1), m.group(2), m.group(3), m.group(4)
+                mark = ui.color("    ✓", ui.OK)
+                print(
+                    mark + " " + ui.color(op, ui.TEAL_BRIGHT)
+                    + " " + ui.color(path, ui.SURFACE)
+                    + "  " + ui.color(f"+{adds}", ui.OK)
+                    + " " + ui.color(f"-{dels}", ui.ERR)
+                )
+                return
         ui.tool_result(d["first_line"][:160], ok=d["ok"])
     elif k == "warn":
         ui.warn(d["text"])
