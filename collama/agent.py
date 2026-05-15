@@ -180,6 +180,10 @@ def render_event(event: Message, rs: _RenderState) -> None:
                 emit=_stream_emit,
                 first_prefix=ui.color("  ● ", ui.TEAL_BRIGHT),
                 cont_prefix="    ",
+                # Live <think> rendering: dim italic, '◦' marker, so the
+                # model's internal reasoning is visible while it thinks.
+                dim_first_prefix=ui.color("  ◦ ", ui.SOFT),
+                dim_cont_prefix=ui.color("    ", ui.SOFT),
             )
             rs.streaming = True
         rs.md.feed(d["text"])  # type: ignore[union-attr]

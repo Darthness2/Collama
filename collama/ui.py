@@ -199,38 +199,58 @@ def render_markdown(text: str) -> str:
 class StreamMarkdown:
     """Render streamed tokens with markdown styling, line-by-line.
 
-    Also ELIDES <plan>...</plan> and <think>...</think> blocks from the
-    streamed output — the engine renders them separately as panels, so
-    showing them inline would print every plan/think twice. The blocks
-    are dropped from this stream but still reach the engine via the
-    accumulated message content.
+    Two ways of handling tagged blocks:
+      • mode='elide' (e.g. <plan>): drop the contents — the engine
+        renders the block as a panel later, showing both would duplicate.
+      • mode='dim' (e.g. <think>): keep the contents but render dim
+        italic with a '◦' prefix so the model's internal reasoning is
+        visible LIVE, clearly distinguished from the final answer
+        (which uses '●'). Each thinking line gets its own visual line.
     """
 
     SUPPRESS_PAIRS = [
-        ("<plan>", "</plan>"),
-        ("<think>", "</think>"),
-        ("<thinking>", "</thinking>"),
+        ("<plan>",     "</plan>",     "elide"),
+        ("<think>",    "</think>",    "dim"),
+        ("<thinking>", "</thinking>", "dim"),
     ]
 
-    def __init__(self, emit, first_prefix: str = "", cont_prefix: str = ""):
+    def __init__(self, emit, first_prefix: str = "", cont_prefix: str = "",
+                 dim_first_prefix: str = "", dim_cont_prefix: str = ""):
         self.emit = emit
         self.first_prefix = first_prefix
         self.cont_prefix = cont_prefix
+        self.dim_first_prefix = dim_first_prefix or first_prefix
+        self.dim_cont_prefix = dim_cont_prefix or cont_prefix
         self.buf = ""
         self.opened = False
-        self.mid_line = False  # last emit had no newline; next emit is a continuation
-        self.suppress_until: str | None = None  # close marker if currently inside a block
-        self._max_open = max(len(o) for o, _ in self.SUPPRESS_PAIRS)
+        self.mid_line = False
+        self.in_dim = False        # currently inside a <think> block
+        self.dim_opened = False    # have we emitted any dim line in current block?
+        self.suppress_until: str | None = None  # close marker if currently eliding
+        self._max_open = max(len(o) for o, _, _ in self.SUPPRESS_PAIRS)
 
     def _emit_line(self, line: str, terminator: str) -> None:
-        if self.mid_line:
-            prefix = ""        # continuing the same visible line — no new prefix
-        elif not self.opened:
-            prefix = self.first_prefix
+        if self.in_dim:
+            # Dim block — italic gray, '◦' prefix for the first line of the
+            # block, indented continuation after.
+            if self.mid_line:
+                prefix = ""
+            elif not self.dim_opened:
+                prefix = self.dim_first_prefix
+                self.dim_opened = True
+            else:
+                prefix = self.dim_cont_prefix
+            styled = color(line, SOFT + ITALIC) if line else ""
+            self.emit(prefix + styled + terminator)
         else:
-            prefix = self.cont_prefix
-        self.opened = True
-        self.emit(prefix + render_markdown(line) + terminator)
+            if self.mid_line:
+                prefix = ""
+            elif not self.opened:
+                prefix = self.first_prefix
+            else:
+                prefix = self.cont_prefix
+            self.opened = True
+            self.emit(prefix + render_markdown(line) + terminator)
         self.mid_line = (terminator == "")
 
     def feed(self, text: str) -> None:
@@ -248,12 +268,11 @@ class StreamMarkdown:
     def _drain(self, *, final: bool) -> None:
         # Loop until no more progress can be made on the buffer.
         while True:
-            if self.suppress_until:
+            if self.suppress_until and not self.in_dim:
+                # ELIDE mode: drop everything up to and including the close.
                 close = self.suppress_until
                 idx = self.buf.find(close)
                 if idx < 0:
-                    # Close not in buffer yet; keep a short tail in case the
-                    # close marker is split across chunks.
                     keep = len(close) - 1
                     if final:
                         self.buf = ""
@@ -262,8 +281,53 @@ class StreamMarkdown:
                     if len(self.buf) > keep:
                         self.buf = self.buf[-keep:]
                     return
-                # Found close — drop everything up to and including it.
                 self.buf = self.buf[idx + len(close):]
+                self.suppress_until = None
+                continue
+
+            if self.in_dim:
+                # DIM mode: keep emitting lines as dim/italic until we hit
+                # the close marker. Treat the close marker as a line break.
+                close = self.suppress_until or ""
+                idx = self.buf.find(close) if close else -1
+                if idx < 0:
+                    # No close yet — emit completed lines, hold a small tail
+                    # so we don't split the close marker across emits.
+                    if "\n" in self.buf:
+                        last_nl = self.buf.rfind("\n")
+                        head = self.buf[:last_nl + 1]
+                        self.buf = self.buf[last_nl + 1:]
+                        for line in head.split("\n")[:-1]:
+                            self._emit_line(line, "\n")
+                        continue
+                    if final:
+                        if self.buf:
+                            self._emit_line(self.buf, "")
+                            self.buf = ""
+                        return
+                    keep = len(close) - 1 if close else 0
+                    if len(self.buf) > keep:
+                        emit_now = self.buf[:-keep] if keep else self.buf
+                        self.buf = self.buf[-keep:] if keep else ""
+                        if emit_now:
+                            self._emit_line(emit_now, "")
+                    return
+                # Close marker found — emit any content before it (with a
+                # newline so the next normal line starts fresh), then exit
+                # dim mode.
+                before = self.buf[:idx]
+                self.buf = self.buf[idx + len(close):]
+                if before:
+                    parts = before.split("\n")
+                    for line in parts[:-1]:
+                        self._emit_line(line, "\n")
+                    if parts[-1]:
+                        self._emit_line(parts[-1], "\n")  # force newline at end of dim block
+                elif self.mid_line:
+                    self.emit("\n")
+                    self.mid_line = False
+                self.in_dim = False
+                self.dim_opened = False
                 self.suppress_until = None
                 continue
 
@@ -271,15 +335,17 @@ class StreamMarkdown:
             earliest = -1
             earliest_close: str | None = None
             earliest_open_len = 0
-            for o, c in self.SUPPRESS_PAIRS:
+            earliest_mode = "elide"
+            for o, c, mode in self.SUPPRESS_PAIRS:
                 i = self.buf.find(o)
                 if i >= 0 and (earliest < 0 or i < earliest):
                     earliest = i
                     earliest_close = c
                     earliest_open_len = len(o)
+                    earliest_mode = mode
 
             if earliest >= 0:
-                # Emit text before the marker, then start suppressing.
+                # Emit text before the marker as normal lines.
                 before = self.buf[:earliest]
                 self.buf = self.buf[earliest + earliest_open_len:]
                 self.suppress_until = earliest_close
@@ -288,7 +354,14 @@ class StreamMarkdown:
                     for line in parts[:-1]:
                         self._emit_line(line, "\n")
                     if parts[-1]:
-                        self._emit_line(parts[-1], "")
+                        # Force newline so dim content starts on its own line.
+                        self._emit_line(parts[-1], "\n" if earliest_mode == "dim" else "")
+                if earliest_mode == "dim":
+                    if self.mid_line:
+                        self.emit("\n")
+                        self.mid_line = False
+                    self.in_dim = True
+                    self.dim_opened = False
                 continue
 
             # No open marker; emit completed lines but hold a small tail to

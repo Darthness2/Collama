@@ -739,9 +739,14 @@ class QueryEngine:
                 continue
 
             thinks, content = _extract_thinking(cleaned)
-            for t in thinks:
-                if t:
-                    yield Message("thinking", {"text": t})
+            # In streaming mode the <think> block was already rendered live
+            # (dim italic, with the ◦ marker); emitting a thinking event
+            # would re-render it as a panel. Only emit for the non-streaming
+            # path where there's no live render.
+            if not self.stream:
+                for t in thinks:
+                    if t:
+                        yield Message("thinking", {"text": t})
             steps, content = _extract_plan(content)
             content = content.strip()
             if steps and not self._plan_shown_this_turn:
