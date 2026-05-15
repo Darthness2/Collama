@@ -462,6 +462,8 @@ class QueryEngine:
         )
         self.messages: list[dict] = [{"role": "system", "content": fetch_system_prompt_parts(state)}]
         self._recent_calls: list[tuple[str, str]] = []
+        self._recent_results: list[tuple[str, str]] = []
+        self._abort_turn = False
         self._plan_shown_this_turn = False
         self._usage = {"input": 0, "output": 0, "ms": 0}
 
@@ -487,6 +489,8 @@ class QueryEngine:
         """Drive one user-turn through the full pipeline."""
         self._plan_shown_this_turn = False
         self._recent_calls = []
+        self._recent_results = []
+        self._abort_turn = False
 
         # processUserInput()
         user_msg = process_user_input(prompt)
@@ -634,6 +638,15 @@ class QueryEngine:
 
             yield from self._execute_and_record(calls)
 
+            if self._abort_turn:
+                yield Message("done", {
+                    "text": "Stopped: the model was stuck repeating the same tool call. "
+                            "Try /retry, rephrase the request, or /new for a fresh context.",
+                    "usage": dict(self._usage),
+                    "session_id": self.session_id,
+                })
+                return
+
         yield Message("error", {"text": f"hit tool-call limit ({MAX_TOOL_ITERATIONS}); stopping."})
 
     # ---- internals ----
@@ -751,6 +764,18 @@ class QueryEngine:
             return True
         return False
 
+    def _result_loop_count(self, name: str, result: str) -> int:
+        """Track repeated identical (tool, result) pairs this turn — the
+        robust loop signal. The model often varies args slightly (path
+        slashes, optional start_line) so arg-based detection misses it, but
+        an identical RESULT coming back means it's genuinely going in
+        circles. Returns how many times this exact (name, result) has been
+        seen so far this turn."""
+        key = (name, (result or "")[:240])
+        self._recent_results.append(key)
+        self._recent_results = self._recent_results[-30:]
+        return self._recent_results.count(key)
+
     def _execute_and_record(self, calls):
         """Run calls through the executor; reflect tool effects into state and
         record results into messages and the on-disk transcript."""
@@ -789,6 +814,34 @@ class QueryEngine:
                         "content": f"Tool result for {name}:\n{result}",
                     })
                 record_transcript(self.session_id or "", "tool", result, name=name)
+
+                # Result-based loop detection: same (tool, result) coming back
+                # repeatedly means the model is stuck — args-based detection
+                # misses this because the model varies args slightly.
+                seen = self._result_loop_count(name, result)
+                if seen == LOOP_THRESHOLD:
+                    yield Message("warn", {
+                        "text": f"loop: {name} returned the same result {seen}× — steering hard"
+                    })
+                    self.messages.append({
+                        "role": "user",
+                        "content": (
+                            f"STOP. You have called {name} and received the EXACT SAME "
+                            f"result {seen} times. You are stuck in a loop and making no "
+                            f"progress. Do NOT call {name} again. You already have the "
+                            f"information you need. Either: (a) make the change the user "
+                            f"asked for RIGHT NOW using edit_file or write_file, or (b) if "
+                            f"something is genuinely missing, give the user a short final "
+                            f"answer explaining what you need. Acting or answering is "
+                            f"mandatory on your next turn — no more reads."
+                        ),
+                    })
+                elif seen >= LOOP_THRESHOLD * 2:
+                    yield Message("warn", {
+                        "text": f"loop unbroken after {seen} identical results — ending turn"
+                    })
+                    self._abort_turn = True
+                    return
 
 
 # ---------------------------------------------------------------- helpers ----
