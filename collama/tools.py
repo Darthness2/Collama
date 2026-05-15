@@ -1672,9 +1672,61 @@ def _all_tools() -> dict[str, ToolFn]:
     return {**TOOLS, **GITHUB_TOOLS}
 
 
-def all_tool_schemas() -> list[dict]:
+# Tool groups — sending all ~50 schemas every request is a heavy prompt-eval
+# cost on a local model. Groups let the heavy/rarely-used ones be opt-in.
+TOOL_GROUPS: dict[str, list[str]] = {
+    "core": [
+        "read_file", "write_file", "edit_file", "list_dir", "grep",
+        "run_bash", "set_workspace",
+    ],
+    "search": ["glob", "tool_search", "web_fetch", "web_search"],
+    "tasks": [
+        "task_create", "task_update", "task_get", "task_list", "task_delete",
+        "todo_write", "brief",
+    ],
+    "background": ["bash_async", "task_status", "task_wait"],
+    "planning": ["enter_plan_mode", "exit_plan_mode"],
+    "notebook": ["notebook_edit"],
+    "worktree": ["enter_worktree", "exit_worktree"],
+    "interaction": ["ask_user_question"],
+    "system": ["config_get", "config_set", "sleep", "schedule_cron", "skill", "powershell"],
+    # heavy / specialized — OFF by default
+    "subagent": ["agent_call", "agent_call_async"],
+    "github": [
+        "gh_whoami", "gh_list_repos", "gh_get_repo", "gh_get_file",
+        "gh_list_issues", "gh_create_issue", "gh_list_pulls", "gh_get_pull",
+        "gh_search_code", "github_api",
+    ],
+    "teams": [
+        "team_create", "team_delete", "team_list", "teammate_create",
+        "teammate_delete", "teammate_list", "send_message", "inbox",
+        "coordinator_tick", "coordinator_run",
+    ],
+    "stubs": ["mcp", "mcp_list_resources", "mcp_read_resource", "lsp", "tungsten"],
+}
+
+DEFAULT_GROUPS: set[str] = {
+    "core", "search", "tasks", "background", "planning",
+    "notebook", "worktree", "interaction", "system",
+}
+# off by default: subagent, github, teams, stubs
+
+
+def _tool_to_group() -> dict[str, str]:
+    out: dict[str, str] = {}
+    for grp, names in TOOL_GROUPS.items():
+        for n in names:
+            out[n] = grp
+    return out
+
+
+def all_tool_schemas(enabled_groups: set[str] | None = None) -> list[dict]:
+    """Return tool schemas for the enabled groups (DEFAULT_GROUPS if None)."""
     from .github import GITHUB_TOOL_SCHEMAS
-    return TOOL_SCHEMAS + GITHUB_TOOL_SCHEMAS
+    groups = DEFAULT_GROUPS if enabled_groups is None else set(enabled_groups)
+    allowed = {n for g in groups for n in TOOL_GROUPS.get(g, ())}
+    schemas = TOOL_SCHEMAS + GITHUB_TOOL_SCHEMAS
+    return [s for s in schemas if s.get("function", {}).get("name") in allowed]
 
 
 def dispatch(name: str, args: dict, ctx: ToolContext) -> str:

@@ -31,6 +31,7 @@ class Agent:
         tools_enabled: bool = True,
         on_tools_disabled: Optional[Callable] = None,
         config: Optional[dict] = None,
+        stream: bool = True,
     ) -> None:
         self.state = AppState(
             workspace=root,
@@ -46,7 +47,7 @@ class Agent:
             temperature=temperature,
             config=config,
             permission_resolver=terminal_resolver,
-            stream=True,  # stream tokens live so generation is visible
+            stream=stream,  # stream tokens live so generation is visible
         )
         self.client = client
         self.on_turn_complete = on_turn_complete
@@ -96,15 +97,29 @@ class Agent:
         self.engine.load_messages(messages)
 
     def turn(self, user_input: str) -> str:
-        """Run a turn, rendering events to the terminal as they stream."""
+        """Run a turn, rendering events to the terminal as they stream.
+
+        Ctrl+C cleanly aborts the in-flight turn: the engine generator is
+        closed (which shuts the streaming HTTP connection), spinners are
+        stopped, and we return to the prompt with whatever was produced so
+        far — the process is not killed.
+        """
         rs = _RenderState()
-        for msg in self.engine.submit_message(user_input):
-            render_event(msg, rs)
-        if self.on_turn_complete:
-            try:
-                self.on_turn_complete(self)
-            except Exception:
-                pass
+        gen = self.engine.submit_message(user_input)
+        try:
+            for msg in gen:
+                render_event(msg, rs)
+        except KeyboardInterrupt:
+            gen.close()
+            ui.stop_all_spinners()
+            print()
+            ui.warn("turn interrupted — back to prompt")
+        finally:
+            if self.on_turn_complete:
+                try:
+                    self.on_turn_complete(self)
+                except Exception:
+                    pass
         return rs.final_text
 
     def stream(self, user_input: str) -> Iterator[Message]:

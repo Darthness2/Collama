@@ -9,6 +9,7 @@ from __future__ import annotations
 SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/help", "show available commands"),
     ("/tools", "list tools the model can call"),
+    ("/groups", "show/change which tool groups are sent to the model"),
     ("/tools-on", "force native tool calls for this model"),
     ("/tools-off", "force text-protocol tool fallback for this model"),
     ("/cd", "show or change the workspace directory"),
@@ -20,6 +21,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/plan", "toggle plan mode (read-only)"),
     ("/todo", "view or modify the session todo list"),
     ("/brief", "list briefs, or print one"),
+    ("/stream", "toggle token streaming on/off"),
     ("/insecure", "toggle SSL verification (school/corp MITM proxies)"),
     ("/diag", "print model / workspace / tools / github status"),
     ("/model", "show or switch model (saved)"),

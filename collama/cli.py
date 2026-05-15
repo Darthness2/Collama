@@ -32,6 +32,7 @@ HELP_TEXT = """\
 Slash commands:
   /help                   show this help
   /tools                  list tools the model can call (and current mode)
+  /groups [en/disable G]  show or change which tool groups are sent to the model
   /tools-on               force native tool calls for this model (saves)
   /tools-off              force text-protocol tool fallback for this model (saves)
   /cd [path]              show or change the workspace directory
@@ -43,6 +44,7 @@ Slash commands:
   /plan on|off            toggle plan mode (read-only, no mutating tools)
   /todo [add|done|clear]  view or modify the session todo list
   /brief [name]           list briefs, or print one
+  /stream on|off          toggle token streaming (turn off on networks that break chunked streams)
   /insecure on|off        toggle SSL verification for HTTPS calls (school/corp MITM proxies)
   /diag                   print model / workspace / home / tools / github status
   /model [name]           show or switch model
@@ -235,6 +237,33 @@ def repl(agent: Agent, cfg: dict) -> int:
                 for n in _all_tools():
                     print(f"  - {n}")
                 continue
+            if cmd == "groups":
+                from .tools import TOOL_GROUPS, DEFAULT_GROUPS
+                active = agent.state.tool_groups if agent.state.tool_groups is not None else DEFAULT_GROUPS
+                if not arg1:
+                    ui.info("tool groups (✓ = sent to the model):")
+                    for g, names in TOOL_GROUPS.items():
+                        mark = ui.color("✓", ui.OK) if g in active else ui.color("·", ui.SOFT)
+                        print(f"  {mark} {g:<12} ({len(names)} tools)")
+                    ui.info("use /groups enable <name> or /groups disable <name>")
+                    continue
+                if arg1 in ("enable", "disable") and arg2:
+                    if arg2 not in TOOL_GROUPS:
+                        ui.warn(f"unknown group '{arg2}' — see /groups")
+                        continue
+                    groups = set(active)
+                    if arg1 == "enable":
+                        groups.add(arg2)
+                    else:
+                        groups.discard(arg2)
+                    agent.state.tool_groups = groups
+                    agent.engine.refresh_system_prompt()
+                    config.set_value(cfg, "tool_groups", sorted(groups))
+                    config.save(cfg)
+                    ui.info(f"{arg1}d '{arg2}' — {len(groups)} group(s) active (saved)")
+                else:
+                    ui.warn("usage: /groups  |  /groups enable <name>  |  /groups disable <name>")
+                continue
             if cmd == "tools-on":
                 agent.tools_enabled = True
                 agent._refresh_system_prompt()
@@ -365,15 +394,31 @@ def repl(agent: Agent, cfg: dict) -> int:
                     ui.warn(f"no brief named '{arg1}'")
                 continue
             if cmd == "diag":
+                from .tools import DEFAULT_GROUPS
+                groups = agent.state.tool_groups if agent.state.tool_groups is not None else DEFAULT_GROUPS
                 ui.info(f"model:    {agent.model}")
                 ui.info(f"workspace: {agent.ctx.root}")
                 ui.info(f"home:     {Path.home()}")
                 ui.info(f"tools:    {'native' if agent.tools_enabled else 'text-protocol fallback'}")
+                ui.info(f"groups:   {', '.join(sorted(groups))}")
+                ui.info(f"stream:   {'on' if agent.engine.stream else 'off'}")
+                ui.info(f"num_ctx:  {agent.client.num_ctx}")
                 ui.info(f"github:   {'logged in' if agent.ctx.github_token else 'no token'}")
                 ui.info(f"ssl:      {'INSECURE (verification off)' if agent.ctx.insecure_ssl else 'verify enabled'}")
                 ui.info(f"input:    {prompt.backend}"
                         + ("" if prompt.backend == "prompt_toolkit"
                            else "  (install prompt_toolkit for the / command popup)"))
+                continue
+            if cmd == "stream":
+                want = arg1.lower() if arg1 else ("off" if agent.engine.stream else "on")
+                if want not in ("on", "off"):
+                    ui.warn("usage: /stream on|off")
+                    continue
+                agent.engine.stream = (want == "on")
+                config.set_value(cfg, "ollama.stream", agent.engine.stream)
+                config.save(cfg)
+                ui.info(f"streaming: {'on' if agent.engine.stream else 'off'} (saved)"
+                        + ("" if agent.engine.stream else " — use this on networks that break chunked streams"))
                 continue
             if cmd == "insecure":
                 want = arg1.lower() if arg1 else ("off" if agent.ctx.insecure_ssl else "on")
@@ -585,6 +630,7 @@ def main(argv: list[str] | None = None) -> int:
         connect_timeout=float(config.get_value(cfg, "ollama.connect_timeout", 15.0)),
         read_timeout=float(config.get_value(cfg, "ollama.read_timeout", 600.0)),
         keep_alive=config.get_value(cfg, "ollama.keep_alive", "30m"),
+        num_ctx=config.get_value(cfg, "ollama.num_ctx", 8192),
     )
 
     model = args.model or os.environ.get("COLLAMA_MODEL") or cfg.get("model")
@@ -646,9 +692,15 @@ def main(argv: list[str] | None = None) -> int:
         temperature=temperature,
         tools_enabled=bool(tools_supported),
         on_tools_disabled=_remember_no_tools,
+        stream=bool(config.get_value(cfg, "ollama.stream", True)),
     )
     agent.ctx.github_token = config.get_value(cfg, "github.token")
     agent.ctx.insecure_ssl = bool(config.get_value(cfg, "insecure_ssl", False))
+
+    # Enabled tool groups (None = tools.DEFAULT_GROUPS).
+    saved_groups = config.get_value(cfg, "tool_groups", None)
+    if isinstance(saved_groups, list) and saved_groups:
+        agent.state.tool_groups = set(saved_groups)
 
     if args.prompt:
         agent.turn(args.prompt)

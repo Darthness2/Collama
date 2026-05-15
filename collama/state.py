@@ -52,6 +52,10 @@ class AppState:
     # Cron-like schedules (s07/s08 hybrid): list of {id, expr, prompt, last_run}.
     schedules: list[dict] = field(default_factory=list)
 
+    # Enabled tool groups — controls which tool schemas are sent to the model.
+    # None means "use tools.DEFAULT_GROUPS".
+    tool_groups: set[str] | None = None
+
     # per-model facts learned at runtime (e.g. tools_supported)
     models: dict[str, dict] = field(default_factory=dict)
 

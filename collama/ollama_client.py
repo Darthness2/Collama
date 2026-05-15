@@ -31,6 +31,7 @@ class OllamaClient:
         connect_timeout: float = 15.0,
         read_timeout: float = 600.0,
         keep_alive: str | int | None = "30m",
+        num_ctx: int | None = 8192,
     ):
         """`timeout` is kept for back-compat. The meaningful knobs:
 
@@ -51,10 +52,17 @@ class OllamaClient:
         # default, honour the explicit `timeout`.
         self.read_timeout = read_timeout if read_timeout != 600.0 else float(timeout)
         self.keep_alive = keep_alive
+        # num_ctx caps the context window Ollama allocates. Collama's prompt
+        # (system prompt + tool schemas + history) is large; without a cap
+        # Ollama can balloon the KV cache and push model layers onto the CPU.
+        self.num_ctx = num_ctx
 
     def _apply_keep_alive(self, payload: dict) -> None:
         if self.keep_alive is not None and "keep_alive" not in payload:
             payload["keep_alive"] = self.keep_alive
+        if self.num_ctx:
+            opts = payload.setdefault("options", {})
+            opts.setdefault("num_ctx", self.num_ctx)
 
     def list_models(self) -> list[str]:
         try:

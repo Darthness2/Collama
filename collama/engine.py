@@ -656,7 +656,7 @@ class QueryEngine:
         _StreamGen that the caller iterates; otherwise returns a fully-assembled
         message."""
         api_messages = normalize_messages_for_api(self.messages)
-        tools = all_tool_schemas() if self.state.tools_enabled else None
+        tools = all_tool_schemas(self.state.tool_groups) if self.state.tools_enabled else None
 
         if yield_deltas and hasattr(self.client, "chat_stream_assembled"):
             gen = self.client.chat_stream_assembled(
@@ -681,7 +681,7 @@ class QueryEngine:
         """Single non-streaming request — used as a fallback when a streamed
         response breaks mid-flight (chunk parse errors, proxy interference)."""
         api_messages = normalize_messages_for_api(self.messages)
-        tools = all_tool_schemas() if self.state.tools_enabled else None
+        tools = all_tool_schemas(self.state.tool_groups) if self.state.tools_enabled else None
         try:
             with ui.Spinner("retrying (no stream)"):
                 return self.client.chat(
