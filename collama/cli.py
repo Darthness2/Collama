@@ -63,6 +63,7 @@ Slash commands:
   /resume [id|number]     list saved conversations or resume one
   /sessions               list saved conversations
   /save [title]           force-save the current conversation (sets title)
+  /rename <new title>     rename the current conversation
   /delete <id|number>     delete a saved conversation
   /yolo                   toggle auto-approve for tool calls
   /exit, /quit            leave
@@ -607,6 +608,17 @@ def repl(agent: Agent, cfg: dict) -> int:
                     session["title"] = (arg1 + (" " + arg2 if arg2 else "")).strip()
                 _autosave(session, agent)
                 ui.info(f"saved {session['id']} — {session.get('title', '')}")
+                continue
+            if cmd == "rename":
+                new_title = (arg1 + (" " + arg2 if arg2 else "")).strip()
+                if not new_title:
+                    ui.info(f"current title: {session.get('title', '(untitled)')}")
+                    ui.warn("usage: /rename <new title>")
+                    continue
+                old = session.get("title", "(untitled)")
+                session["title"] = new_title
+                _autosave(session, agent)
+                ui.info(f"renamed: '{old}' → '{new_title}'")
                 continue
             if cmd == "delete":
                 listed = sessions.list_all()

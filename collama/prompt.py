@@ -40,6 +40,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/resume", "list/resume saved conversations"),
     ("/sessions", "list saved conversations"),
     ("/save", "force-save / set title of current conversation"),
+    ("/rename", "rename the current conversation"),
     ("/delete", "delete a saved conversation"),
     ("/yolo", "toggle auto-approve for tool calls"),
     ("/exit", "leave Collama"),
