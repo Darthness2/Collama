@@ -72,6 +72,24 @@ class OllamaClient:
             raise OllamaError(f"could not reach Ollama at {self.host}: {e}") from e
         return [m["name"] for m in r.json().get("models", [])]
 
+    def unload(self, model: str) -> bool:
+        """Tell Ollama to evict `model` from VRAM immediately.
+
+        Ollama unloads a model when a request specifies keep_alive=0. We POST
+        a no-op generate request with that flag. Best-effort: returns True on
+        success, False otherwise. Used by Collama on shutdown so closing the
+        window doesn't leave a 14B model resident in your GPU.
+        """
+        try:
+            r = requests.post(
+                f"{self.host}/api/generate",
+                json={"model": model, "keep_alive": 0},
+                timeout=5,
+            )
+            return r.status_code == 200
+        except requests.RequestException:
+            return False
+
     def chat(
         self,
         model: str,

@@ -96,6 +96,12 @@ class Agent:
     def load_messages(self, messages: list[dict]) -> None:
         self.engine.load_messages(messages)
 
+    # Back-compat: callers still using the old private name on Agent.
+    def refresh_system_prompt(self) -> None:
+        self.engine.refresh_system_prompt()
+
+    _refresh_system_prompt = refresh_system_prompt
+
     def turn(self, user_input: str) -> str:
         """Run a turn, rendering events to the terminal as they stream.
 

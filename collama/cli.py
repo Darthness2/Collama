@@ -266,14 +266,14 @@ def repl(agent: Agent, cfg: dict) -> int:
                 continue
             if cmd == "tools-on":
                 agent.tools_enabled = True
-                agent._refresh_system_prompt()
+                agent.engine.refresh_system_prompt()
                 config.set_value(cfg, f"models.{agent.model}.tools_supported", True)
                 config.save(cfg)
                 ui.info(f"native tools force-enabled for '{agent.model}' (saved).")
                 continue
             if cmd == "tools-off":
                 agent.tools_enabled = False
-                agent._refresh_system_prompt()
+                agent.engine.refresh_system_prompt()
                 config.set_value(cfg, f"models.{agent.model}.tools_supported", False)
                 config.save(cfg)
                 ui.info(f"using text-protocol fallback for '{agent.model}' (saved).")
@@ -287,7 +287,7 @@ def repl(agent: Agent, cfg: dict) -> int:
                     ui.error(f"not a directory: {target}")
                     continue
                 agent.ctx.root = target
-                agent._refresh_system_prompt()
+                agent.engine.refresh_system_prompt()
                 ui.info(f"workspace → {target}")
                 continue
             if cmd == "tasks":
@@ -444,7 +444,7 @@ def repl(agent: Agent, cfg: dict) -> int:
                     # Re-evaluate tool support for the new model.
                     supported = config.get_value(cfg, f"models.{arg1}.tools_supported", True)
                     agent.tools_enabled = bool(supported)
-                    agent._refresh_system_prompt()
+                    agent.engine.refresh_system_prompt()
                     agent.on_tools_disabled = lambda _a: (
                         config.set_value(cfg, f"models.{arg1}.tools_supported", False)
                         or config.save(cfg)
@@ -701,6 +701,34 @@ def main(argv: list[str] | None = None) -> int:
     saved_groups = config.get_value(cfg, "tool_groups", None)
     if isinstance(saved_groups, list) and saved_groups:
         agent.state.tool_groups = set(saved_groups)
+
+    # Unload the model on exit so closing the window / quitting doesn't leave
+    # the model resident in VRAM. We unload whatever model is current at
+    # shutdown — works for both normal exit (/exit, EOF) and abrupt closes
+    # (Ctrl+C, SIGTERM, console window close on Windows -> SIGBREAK).
+    import atexit
+    import signal
+
+    _unloaded = {"done": False}
+
+    def _shutdown_unload(*_args):
+        if _unloaded["done"]:
+            return
+        _unloaded["done"] = True
+        try:
+            client.unload(agent.model)
+        except Exception:
+            pass
+
+    atexit.register(_shutdown_unload)
+    for sig_name in ("SIGTERM", "SIGBREAK", "SIGHUP"):
+        sig = getattr(signal, sig_name, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, lambda *_: (_shutdown_unload(), sys.exit(0)))
+        except (ValueError, OSError):
+            pass
 
     if args.prompt:
         agent.turn(args.prompt)
