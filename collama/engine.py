@@ -717,9 +717,19 @@ class QueryEngine:
                     finally:
                         spinner.stop()
                     if final_msg is None:
-                        yield Message("error", {"text": "stream ended without 'done'"})
+                        # chat_stream_assembled always synthesizes a 'done'
+                        # now, so this only happens if the iterator was
+                        # exhausted with zero chunks (broken socket before
+                        # any response). Treat as a no-output turn.
+                        yield Message("warn", {
+                            "text": "stream produced no chunks — Ollama may have crashed; try /retry"
+                        })
                         return
                     if final_msg != "RETRIED":
+                        if final_msg.get("truncated"):
+                            yield Message("warn", {
+                                "text": "response was truncated (stream closed early — Ollama crashed or was killed); using what arrived"
+                            })
                         msg = final_msg["message"]
                         usage = {
                             "input": final_msg.get("prompt_eval_count", 0),

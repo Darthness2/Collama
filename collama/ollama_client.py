@@ -253,3 +253,20 @@ class OllamaClient:
                     "total_duration_ns": int(chunk.get("total_duration") or 0),
                 })
                 return
+
+        # Stream ended without ever seeing a 'done' chunk — usually means the
+        # Ollama worker died mid-response (Metal/OOM crash, kill, network
+        # proxy closed the socket). Don't throw the partial response away;
+        # synthesize a 'done' from what we accumulated so the caller can
+        # still act on the content received so far.
+        yield ("done", {
+            "message": {
+                "role": role,
+                "content": full,
+                "tool_calls": tool_calls,
+            },
+            "eval_count": 0,
+            "prompt_eval_count": 0,
+            "total_duration_ns": 0,
+            "truncated": True,
+        })
