@@ -56,6 +56,8 @@ Slash commands:
   /logout github          remove the saved GitHub token
   /whoami                 show authenticated GitHub user
   /clear                  reset conversation history (does not delete saved session)
+  /diff [N]               show the last N (default all) file edits this session
+  /undo                   revert the most recent file edit
   /retry                  re-run your last message (handy after a bad turn)
   /new [title]            start a new conversation
   /resume [id|number]     list saved conversations or resume one
@@ -516,6 +518,41 @@ def repl(agent: Agent, cfg: dict) -> int:
             if cmd == "clear":
                 agent.reset()
                 ui.info("history cleared")
+                continue
+            if cmd == "diff":
+                # Show what the model has edited since the session started.
+                hist = list(agent.state.edit_history or [])
+                if not hist:
+                    ui.info("(no edits this session)")
+                    continue
+                from . import diff as _diff
+                limit = int(arg1) if arg1.isdigit() else len(hist)
+                for entry in hist[-limit:]:
+                    path = entry.get("path", "?")
+                    op = entry.get("op", "edit")
+                    before = entry.get("before", "")
+                    after = entry.get("after", "")
+                    adds, dels = _diff.stats(before, after)
+                    print(ui.color(f"  {op}  {path}  ", ui.TEAL_BRIGHT) +
+                          ui.color(f"(+{adds} -{dels})", ui.MUTED))
+                    rendered = _diff.render(before, after, path, max_lines=20)
+                    if rendered:
+                        print(rendered)
+                continue
+            if cmd == "undo":
+                hist = list(agent.state.edit_history or [])
+                if not hist:
+                    ui.info("(no edits to undo)")
+                    continue
+                entry = hist.pop()
+                p = Path(entry["path"])
+                try:
+                    p.write_text(entry.get("before", ""))
+                except OSError as e:
+                    ui.error(f"undo failed: {e}")
+                    continue
+                agent.state.update(edit_history=hist)
+                ui.info(f"reverted {entry.get('op', 'edit')} on {p}")
                 continue
             if cmd == "new":
                 # Save current (autosave already runs on turns; do a final save with title).

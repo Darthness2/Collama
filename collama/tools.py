@@ -45,6 +45,9 @@ class ToolContext:
     background: object | None = None
     tasks: object | None = None
     teams: object | None = None
+    # Per-turn read cache: {resolved_path -> last result}. Plumbed in by the
+    # engine; read_file populates it, edit_file/write_file invalidate it.
+    read_cache: dict | None = None
 
     def confirm(self, action: str, detail: str) -> bool:
         if self.yolo:
@@ -71,6 +74,22 @@ def t_read_file(args: dict, ctx: ToolContext) -> str:
         return f"ERROR: file not found: {path}"
     if not p.is_file():
         return f"ERROR: not a file: {path}"
+
+    # Per-turn cache — if this exact (path, start, end) was already read this
+    # turn, return the cached result with a nudge. Stops the 'read the same
+    # file 6 times' loop that small models fall into.
+    cache_key = (str(p.resolve()), int(start), -1 if end is None else int(end))
+    cache = ctx.read_cache if isinstance(ctx.read_cache, dict) else None
+    if cache is not None and cache_key in cache:
+        cached = cache[cache_key]
+        first = cached.splitlines()[0] if cached else ""
+        return (
+            f"[CACHED — you already read this file earlier in this turn. "
+            f"Scroll back instead of re-reading. If you need different lines, "
+            f"pass start_line/end_line.]\n{first}\n…\n"
+            f"(use what you have to act, or call edit_file now)"
+        )
+
     try:
         text = p.read_text(errors="replace")
     except Exception as e:
@@ -81,7 +100,38 @@ def t_read_file(args: dict, ctx: ToolContext) -> str:
     selected = lines[s:e]
     numbered = "\n".join(f"{i + s + 1:>5}  {ln}" for i, ln in enumerate(selected))
     header = f"{path}  ({len(lines)} lines)"
-    return _truncate(f"{header}\n{numbered}")
+    out = _truncate(f"{header}\n{numbered}")
+    if cache is not None:
+        cache[cache_key] = out
+    return out
+
+
+MAX_EDIT_HISTORY = 50
+
+
+def _record_edit(ctx: ToolContext, path: Path, before: str, after: str, op: str) -> None:
+    """Push an edit to state.edit_history and invalidate any read cache for
+    this path. Powers /undo and /diff and prevents the read cache from
+    serving stale content after a write."""
+    state = getattr(ctx, "state", None)
+    if state is not None:
+        import time as _t
+        hist: list = getattr(state, "edit_history", None) or []
+        hist.append({
+            "ts": _t.time(),
+            "path": str(path.resolve()),
+            "before": before,
+            "after": after,
+            "op": op,
+        })
+        del hist[:-MAX_EDIT_HISTORY]
+        state.update(edit_history=hist)
+    cache = getattr(ctx, "read_cache", None)
+    if isinstance(cache, dict):
+        rp = str(path.resolve())
+        for k in list(cache):
+            if isinstance(k, tuple) and k and k[0] == rp:
+                del cache[k]
 
 
 def t_write_file(args: dict, ctx: ToolContext) -> str:
@@ -96,6 +146,7 @@ def t_write_file(args: dict, ctx: ToolContext) -> str:
         return "ERROR: user denied write"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content)
+    _record_edit(ctx, p, old_text, content, "write")
     rendered = _diff.render(old_text, content, path)
     if rendered:
         print(rendered)
@@ -170,6 +221,7 @@ def t_edit_file(args: dict, ctx: ToolContext) -> str:
             return "ERROR: user denied edit"
         new_text = raw.replace(old, new) if replace_all else raw.replace(old, new, 1)
         p.write_text(new_text)
+        _record_edit(ctx, p, raw, new_text, "edit")
         rendered = _diff.render(raw, new_text, path)
         if rendered:
             print(rendered)
@@ -207,6 +259,7 @@ def t_edit_file(args: dict, ctx: ToolContext) -> str:
         new_text = "\n".join(file_lines[:i] + new_n.split("\n") + file_lines[j:])
 
     p.write_text(new_text)
+    _record_edit(ctx, p, raw, new_text, "edit")
     rendered = _diff.render(text, new_text, path)
     if rendered:
         print(rendered)
@@ -252,6 +305,25 @@ def t_grep(args: dict, ctx: ToolContext) -> str:
     path = args.get("path", ".")
     case_insensitive = bool(args.get("case_insensitive", False))
     p = _resolve(path, ctx.root)
+
+    # Fast path: if ripgrep is installed, use it. Way faster than Python regex
+    # walks on big trees, and it respects .gitignore by default.
+    import shutil as _sh
+    rg = _sh.which("rg")
+    if rg and p.exists():
+        cmd = [rg, "-n", "--no-heading", "--color=never", "-m", "200"]
+        if case_insensitive:
+            cmd.append("-i")
+        cmd.extend(["--", pattern, str(p)])
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            return "ERROR: rg timed out after 30s"
+        if proc.returncode in (0, 1):  # 0=hits, 1=no hits (not an error)
+            out = proc.stdout.strip()
+            return _truncate(out) if out else "(no matches)"
+        # Unexpected rg failure — fall through to the Python implementation.
+
     flags = re.IGNORECASE if case_insensitive else 0
     try:
         rx = re.compile(pattern, flags)

@@ -334,10 +334,70 @@ gh_list_pulls, gh_get_pull, gh_search_code, github_api.
     return base
 
 
-def process_user_input(raw: str) -> dict:
-    """Parse user input into a UserMessage. Slash commands are handled by the
-    REPL before reaching here, so for now this is a passthrough."""
-    return {"role": "user", "content": raw}
+_MENTION_RX = re.compile(r"(?<![\w/.])@([A-Za-z0-9_./\\-]+(?::\d+(?:-\d+)?)?)")
+
+
+def _resolve_mention(token: str, workspace: Path, home: Path) -> tuple[Path, int | None, int | None] | None:
+    """Resolve an `@token` to (path, start_line?, end_line?). Returns None if
+    the path doesn't exist."""
+    line_start: int | None = None
+    line_end: int | None = None
+    path_part = token
+    # Support @path:N or @path:N-M
+    if ":" in token:
+        head, tail = token.rsplit(":", 1)
+        m = re.fullmatch(r"(\d+)(?:-(\d+))?", tail)
+        if m:
+            path_part = head
+            line_start = int(m.group(1))
+            line_end = int(m.group(2)) if m.group(2) else line_start
+    import os as _os
+    expanded = _os.path.expanduser(_os.path.expandvars(path_part))
+    p = Path(expanded)
+    if not p.is_absolute():
+        p = workspace / p
+    if p.exists() and p.is_file():
+        return p, line_start, line_end
+    return None
+
+
+def process_user_input(raw: str, workspace: Path | None = None, home: Path | None = None) -> dict:
+    """Parse user input into a UserMessage.
+
+    Expands `@path/to/file` mentions (optionally `@path:N` or `@path:N-M`) by
+    inlining the referenced file's contents — drops a couple of tool calls
+    off most fix tasks and anchors the model to the right code immediately.
+    """
+    if not workspace or "@" not in raw:
+        return {"role": "user", "content": raw}
+    attachments: list[str] = []
+    seen: set[Path] = set()
+    for m in _MENTION_RX.finditer(raw):
+        resolved = _resolve_mention(m.group(1), workspace, home or Path.home())
+        if resolved is None:
+            continue
+        p, s, e = resolved
+        if p in seen:
+            continue
+        seen.add(p)
+        try:
+            text = p.read_text(errors="replace")
+        except OSError as exc:
+            attachments.append(f"--- @{p} (read failed: {exc}) ---")
+            continue
+        lines = text.splitlines()
+        lo = (s - 1) if s else 0
+        hi = e if e else len(lines)
+        lo = max(0, lo)
+        hi = min(len(lines), hi)
+        selected = lines[lo:hi]
+        numbered = "\n".join(f"{lo + i + 1:>5}  {ln}" for i, ln in enumerate(selected))
+        range_hdr = f":{s}-{e}" if s else ""
+        attachments.append(f"--- @{p}{range_hdr}  ({len(lines)} lines total) ---\n{numbered}")
+    if not attachments:
+        return {"role": "user", "content": raw}
+    body = raw + "\n\n" + "\n\n".join(attachments)
+    return {"role": "user", "content": body}
 
 
 def normalize_messages_for_api(messages: list[dict]) -> list[dict]:
@@ -427,6 +487,7 @@ class StreamingToolExecutor:
             background=self.background,
             tasks=self.tasks,
             teams=self.teams,
+            read_cache=getattr(self.engine, "_read_cache", None),
         )
         try:
             result = dispatch(name, args, ctx)
@@ -480,6 +541,8 @@ class QueryEngine:
         self._abort_turn = False
         self._plan_shown_this_turn = False
         self._usage = {"input": 0, "output": 0, "ms": 0}
+        # Per-turn file-read cache; reset at the start of every submit_message.
+        self._read_cache: dict = {}
 
     # ---- public API ----
 
@@ -505,9 +568,10 @@ class QueryEngine:
         self._recent_calls = []
         self._recent_results = []
         self._abort_turn = False
+        self._read_cache = {}
 
         # processUserInput()
-        user_msg = process_user_input(prompt)
+        user_msg = process_user_input(prompt, workspace=self.state.workspace, home=self.state.home)
         yield Message("user", {"text": prompt})
 
         # recordTranscript()

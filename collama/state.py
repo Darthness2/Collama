@@ -56,6 +56,11 @@ class AppState:
     # None means "use tools.DEFAULT_GROUPS".
     tool_groups: set[str] | None = None
 
+    # Edit history for /undo and /diff: list of
+    #   {"ts", "path", "before", "after", "op"}
+    # capped at MAX_EDIT_HISTORY entries (oldest dropped).
+    edit_history: list[dict] = field(default_factory=list)
+
     # per-model facts learned at runtime (e.g. tools_supported)
     models: dict[str, dict] = field(default_factory=dict)
 
