@@ -198,9 +198,37 @@ def repl(agent: Agent, cfg: dict) -> int:
 
     # Active session (auto-created, auto-saved after each turn)
     session = sessions.make(agent.model)
-    agent.on_turn_complete = lambda a: _autosave(session, a)
+
+    # VRAM check: warn early if the model is partially CPU-offloaded so the
+    # user knows what to expect (slow responses, occasional truncations) and
+    # gets a one-line concrete recommendation. Triggers at startup if the
+    # model is already resident (kept warm by Ollama's keep_alive), and again
+    # after the first turn loads it.
+    _warned_offload = {"shown": False}
+
+    def _check_vram_after_turn(a):
+        _autosave(session, a)
+        if _warned_offload["shown"]:
+            return
+        st = a.client.model_vram_status(a.model)
+        if st and not st["fully_gpu"]:
+            size_gb = st["size"] / (1024**3)
+            cpu_gb = st["cpu_bytes"] / (1024**3)
+            ui.warn(
+                f"{a.model} is {cpu_gb:.1f} GB on CPU "
+                f"({st['cpu_percent']:.0f}% offloaded — total {size_gb:.1f} GB). "
+                f"This is why responses are slow / get truncated. Try a smaller "
+                f"model with /model (qwen2.5-coder:14b fully fits 16 GB)."
+            )
+            _warned_offload["shown"] = True
+
+    agent.on_turn_complete = _check_vram_after_turn
     agent.engine.session_id = session["id"]
     ui.info(f"new session: {session['id']}")
+
+    # Run the same check up-front in case the model is already resident
+    # (Ollama's keep_alive can leave it loaded between Collama runs).
+    _check_vram_after_turn(agent)
 
     prompt = Prompt()
     if prompt.status_note:
@@ -408,6 +436,18 @@ def repl(agent: Agent, cfg: dict) -> int:
                 ui.info(f"num_ctx:  {agent.client.num_ctx}")
                 ui.info(f"timeout:  stream {agent.client.read_timeout:.0f}s per-chunk · "
                         f"non-stream {agent.client.nonstream_read_timeout:.0f}s whole-response")
+                status = agent.client.model_vram_status(agent.model)
+                if status is None:
+                    ui.info("vram:     model not currently loaded (first turn will load it)")
+                elif status["fully_gpu"]:
+                    ui.info(f"vram:     {status['size_vram'] / (1024**3):.1f} GB · fully on GPU ✓")
+                else:
+                    size_gb = status["size"] / (1024**3)
+                    vram_gb = status["size_vram"] / (1024**3)
+                    cpu_gb = status["cpu_bytes"] / (1024**3)
+                    ui.warn(f"vram:     {vram_gb:.1f}/{size_gb:.1f} GB on GPU · "
+                            f"{cpu_gb:.1f} GB on CPU ({status['cpu_percent']:.0f}% offloaded — "
+                            f"expect slowness and truncations)")
                 ui.info(f"github:   {'logged in' if agent.ctx.github_token else 'no token'}")
                 ui.info(f"ssl:      {'INSECURE (verification off)' if agent.ctx.insecure_ssl else 'verify enabled'}")
                 ui.info(f"input:    {prompt.backend}"

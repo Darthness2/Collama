@@ -103,6 +103,43 @@ class OllamaClient:
             raise OllamaError(f"could not reach Ollama at {self.host}: {e}") from e
         return [m["name"] for m in r.json().get("models", [])]
 
+    def loaded_models(self) -> list[dict]:
+        """List currently-resident models (calls Ollama's /api/ps).
+
+        Each entry has at least: name, size (total bytes), size_vram (bytes
+        actually in GPU memory). When size_vram < size, the difference is
+        being held in CPU/system RAM and the model is partially offloaded.
+        Best-effort: returns [] if the endpoint is unreachable.
+        """
+        try:
+            r = requests.get(f"{self.host}/api/ps", timeout=5)
+            if r.status_code != 200:
+                return []
+            return r.json().get("models", []) or []
+        except (requests.RequestException, ValueError):
+            return []
+
+    def model_vram_status(self, name: str) -> dict | None:
+        """Return {loaded, size, size_vram, cpu_bytes, cpu_percent, fully_gpu}
+        for the given model name, or None if the model isn't currently loaded.
+        """
+        target = (name or "").strip()
+        for m in self.loaded_models():
+            if m.get("name") == target or m.get("model") == target:
+                size = int(m.get("size") or 0)
+                size_vram = int(m.get("size_vram") or 0)
+                cpu = max(0, size - size_vram)
+                pct = (cpu / size * 100) if size > 0 else 0
+                return {
+                    "loaded": True,
+                    "size": size,
+                    "size_vram": size_vram,
+                    "cpu_bytes": cpu,
+                    "cpu_percent": pct,
+                    "fully_gpu": cpu == 0,
+                }
+        return None
+
     def unload(self, model: str) -> bool:
         """Tell Ollama to evict `model` from VRAM immediately.
 
