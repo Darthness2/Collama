@@ -411,7 +411,36 @@ def hr(char: str = "─", c: str = TEAL_DIM) -> None:
 
 # ---------- spinner ----------
 
-_SPIN_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+# Default: a little axolotl swimming back and forth — appears on the line the
+# agent is currently working on (thinking / running a shell command / etc.).
+# The braille frames are kept as a fallback for terminals without good unicode
+# support (NO_COLOR or COLLAMA_SPINNER=braille).
+_AXOLOTL_FRAMES = (
+    "~(◕‿◕)~",
+    "~(◕‿◕)~~",
+    "~~(◕‿◕)~~",
+    "~~~(◕‿◕)~",
+    "~~(◕‿◕)~~",
+    "~(◕‿◕)~",
+    "(◕‿◕)~",
+    "~(◕‿◕)~",
+    "~~(◕‿◕)~~",
+    "~~~(◕‿◕)~~~",
+    "~~(◕‿◕)~~",
+    "~(◕‿◕)~",
+)
+
+_BRAILLE_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+
+
+def _default_frames() -> tuple[str, ...]:
+    style = os.environ.get("COLLAMA_SPINNER", "axolotl").lower()
+    if style == "braille":
+        return _BRAILLE_FRAMES
+    return _AXOLOTL_FRAMES
+
+
+_SPIN_FRAMES = _default_frames()
 
 # Track any live spinner so we can force-stop it before reading user input.
 _active_spinners: list["Spinner"] = []
