@@ -233,6 +233,9 @@ def repl(agent: Agent, cfg: dict) -> int:
     prompt = Prompt()
     if prompt.status_note:
         ui.warn(prompt.status_note)
+    if not agent.engine.stream:
+        ui.warn("streaming is OFF — you'll only see the answer after generation "
+                "completes. Use /stream on to see tokens as they're generated.")
     last_user_input = ""
     while True:
         ui.prepare_for_input()

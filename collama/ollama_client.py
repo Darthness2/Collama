@@ -31,6 +31,36 @@ def _normalize_host(host: str) -> str:
     return s
 
 
+def _explain_http_error(status: int, body: str) -> str:
+    """Translate raw Ollama HTTP errors into something actionable.
+
+    Some Ollama-internal failures (Go XML parser, template render errors)
+    bubble up as ugly 500s. Recognize the common ones and give the user a
+    concrete next step instead of dumping the raw payload.
+    """
+    b = body.lower()
+    # Common Ollama-internal parse failures — typically transient, retry works.
+    if status == 500 and ("xml syntax error" in b or "template:" in b
+                          or "json: cannot unmarshal" in b):
+        return (
+            f"ollama internal error (HTTP 500): {body[:200]}\n"
+            "→ this is an Ollama parser hiccup, usually transient. Try /retry. "
+            "If it repeats, try a different model or a smaller prompt (/new)."
+        )
+    if status == 500 and ("out of memory" in b or "oom" in b or "metal" in b):
+        return (
+            f"ollama out of memory (HTTP 500): {body[:200]}\n"
+            "→ the model doesn't fit on your GPU. Try a smaller model "
+            "(/model qwen2.5-coder:14b) or lower num_ctx in config."
+        )
+    if status == 404 and "model" in b:
+        return (
+            f"ollama HTTP 404: {body[:200]}\n"
+            "→ the model isn't installed locally. Run: ollama pull <model>"
+        )
+    return f"chat HTTP {status}: {body}"
+
+
 def _looks_like_tools_error(body: str) -> bool:
     b = body.lower()
     return (
@@ -191,7 +221,7 @@ class OllamaClient:
             body = r.text[:500]
             if r.status_code == 400 and tools and _looks_like_tools_error(body):
                 raise ToolsUnsupportedError(body)
-            raise OllamaError(f"chat HTTP {r.status_code}: {body}")
+            raise OllamaError(_explain_http_error(r.status_code, body))
         try:
             data = r.json()
         except json.JSONDecodeError as e:
@@ -232,7 +262,7 @@ class OllamaClient:
                     body = r.text[:500]
                     if r.status_code == 400 and tools and _looks_like_tools_error(body):
                         raise ToolsUnsupportedError(body)
-                    raise OllamaError(f"chat HTTP {r.status_code}: {body}")
+                    raise OllamaError(_explain_http_error(r.status_code, body))
                 for line in r.iter_lines(decode_unicode=True):
                     if not line:
                         continue
