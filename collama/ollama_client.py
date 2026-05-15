@@ -30,31 +30,38 @@ class OllamaClient:
         timeout: int = 600,
         connect_timeout: float = 15.0,
         read_timeout: float = 600.0,
+        nonstream_read_timeout: float = 1800.0,
         keep_alive: str | int | None = "30m",
         num_ctx: int | None = 8192,
     ):
-        """`timeout` is kept for back-compat. The meaningful knobs:
+        """Timeouts split by transport because they mean different things:
 
         - connect_timeout: seconds to establish the TCP connection.
-        - read_timeout: for STREAMING calls this is the max gap *between
-          chunks*, NOT the whole-response budget — so a 30-minute
-          generation is fine as long as tokens keep arriving. For
-          non-streaming calls it's the whole-response budget.
+        - read_timeout (STREAMING only): max gap BETWEEN streamed chunks.
+          A 30-minute generation is fine as long as tokens keep arriving.
+        - nonstream_read_timeout (NON-STREAMING only): whole-response
+          wall-clock budget. Defaults to 30 min because non-streaming
+          can't observe progress — if a request really is slow, we don't
+          want a fast 'read_timeout' tuned for streaming to kill it.
         - keep_alive: how long Ollama keeps the model resident in VRAM
-          after a request ('30m', '1h', 0 to unload immediately, -1 to
-          keep forever). Keeping it loaded avoids a cold disk->VRAM
-          reload on every turn.
+          ('30m', '1h', 0 to unload immediately, -1 to keep forever).
+        - num_ctx: caps the context window Ollama allocates; protects
+          VRAM from KV-cache balloon on big prompts.
+
+        `timeout` is kept for back-compat: if you pass it and leave both
+        read timeouts at their defaults, it overrides them both.
         """
         self.host = host.rstrip("/")
         self.timeout = timeout
         self.connect_timeout = connect_timeout
-        # If the caller passed a custom `timeout` but left read_timeout at the
-        # default, honour the explicit `timeout`.
-        self.read_timeout = read_timeout if read_timeout != 600.0 else float(timeout)
+        legacy_override = timeout != 600
+        self.read_timeout = (
+            float(timeout) if legacy_override and read_timeout == 600.0 else read_timeout
+        )
+        self.nonstream_read_timeout = (
+            float(timeout) if legacy_override and nonstream_read_timeout == 1800.0 else nonstream_read_timeout
+        )
         self.keep_alive = keep_alive
-        # num_ctx caps the context window Ollama allocates. Collama's prompt
-        # (system prompt + tool schemas + history) is large; without a cap
-        # Ollama can balloon the KV cache and push model layers onto the CPU.
         self.num_ctx = num_ctx
 
     def _apply_keep_alive(self, payload: dict) -> None:
@@ -112,7 +119,10 @@ class OllamaClient:
             r = requests.post(
                 f"{self.host}/api/chat",
                 json=payload,
-                timeout=(self.connect_timeout, self.read_timeout),
+                # Non-streaming: the read timeout is the whole-response
+                # budget, so it has to be generous on slow models / big
+                # contexts. Streaming has its own per-chunk timeout below.
+                timeout=(self.connect_timeout, self.nonstream_read_timeout),
             )
         except requests.RequestException as e:
             raise OllamaError(f"chat request failed: {e}") from e

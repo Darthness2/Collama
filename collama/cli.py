@@ -405,6 +405,8 @@ def repl(agent: Agent, cfg: dict) -> int:
                 ui.info(f"groups:   {', '.join(sorted(groups))}")
                 ui.info(f"stream:   {'on' if agent.engine.stream else 'off'}")
                 ui.info(f"num_ctx:  {agent.client.num_ctx}")
+                ui.info(f"timeout:  stream {agent.client.read_timeout:.0f}s per-chunk · "
+                        f"non-stream {agent.client.nonstream_read_timeout:.0f}s whole-response")
                 ui.info(f"github:   {'logged in' if agent.ctx.github_token else 'no token'}")
                 ui.info(f"ssl:      {'INSECURE (verification off)' if agent.ctx.insecure_ssl else 'verify enabled'}")
                 ui.info(f"input:    {prompt.backend}"
@@ -666,6 +668,7 @@ def main(argv: list[str] | None = None) -> int:
         host=host,
         connect_timeout=float(config.get_value(cfg, "ollama.connect_timeout", 15.0)),
         read_timeout=float(config.get_value(cfg, "ollama.read_timeout", 600.0)),
+        nonstream_read_timeout=float(config.get_value(cfg, "ollama.nonstream_read_timeout", 1800.0)),
         keep_alive=config.get_value(cfg, "ollama.keep_alive", "30m"),
         num_ctx=config.get_value(cfg, "ollama.num_ctx", 8192),
     )
