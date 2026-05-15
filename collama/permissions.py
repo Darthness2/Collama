@@ -79,14 +79,29 @@ def can_use_tool(
 
 
 def terminal_resolver(name: str, args: dict, state: AppState) -> str:
-    """Interactive REPL resolver. Choices:
-        y / yes      → allow this one call
-        n / no       → deny this one call
-        a / always   → always allow THIS tool from now on
-        A / all      → flip yolo mode ON: allow EVERYTHING for the rest of the session
-        N / never    → never allow this tool again
+    """Interactive REPL resolver. Choices (case-insensitive):
+
+        y, yes          → allow this one call
+        n, no, <Enter>  → deny this one call
+        a, always       → always allow THIS tool
+        yolo, all       → flip yolo mode ON: allow EVERYTHING this session
+        never           → never allow THIS tool again
+
+    The 'yolo'/'all' word is required (not just a single capital letter)
+    so a missed keystroke or terminal-state quirk can't accidentally
+    enable auto-approve for everything.
     """
     from . import ui
+
+    # Ensure the terminal is in a clean state before reading input — stops
+    # any spinner that might still be redrawing, shows the cursor, flushes
+    # any pending streamed output.
+    ui.stop_all_spinners()
+    import sys as _sys
+    if _sys.stdout.isatty():
+        _sys.stdout.write("\033[?25h")
+        _sys.stdout.flush()
+
     detail = ""
     if name == "run_bash":
         detail = f": {args.get('command', '')}"
@@ -98,19 +113,20 @@ def terminal_resolver(name: str, args: dict, state: AppState) -> str:
         detail = f": {name} {args}"
     ui.warn(f"\nApprove {name}{detail}?")
     try:
-        ans = input("  [y]es / [n]o / [a]lways this tool / [A]ll (yolo) / [N]ever: ").strip()
+        ans = input("  [y]es / [n]o / [a]lways this tool / 'yolo' to approve all / never: ").strip().lower()
     except EOFError:
         return "no"
-    if ans in ("A", "all", "yall", "yolo", "yes-all", "yesall"):
-        # Flip the global state so we never prompt again this session.
+
+    # Whole-word "yolo"/"all" required to flip the session-wide switch —
+    # accidentally typing "a" no longer turns off every future prompt.
+    if ans in ("yolo", "all"):
         state.update(yolo=True)
         ui.info("yolo mode ON — no further approval prompts this session. Toggle with /yolo.")
         return "yes"
-    low = ans.lower()
-    if low in ("a", "always"):
+    if ans in ("a", "always"):
         return "always"
-    if low == "never":
+    if ans == "never":
         return "never"
-    if low in ("y", "yes"):
+    if ans in ("y", "yes"):
         return "yes"
     return "no"
