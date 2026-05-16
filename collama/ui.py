@@ -126,6 +126,9 @@ _MD_ITALIC_AST_RX = re.compile(r"(?<![*\w])\*([^*\n]+?)\*(?!\w)")
 _MD_ITALIC_UND_RX = re.compile(r"(?<!\w)_([^_\n]+?)_(?!\w)")
 _MD_HEADER_RX = re.compile(r"^(#{1,6})\s+(.*)$", re.MULTILINE)
 _MD_BULLET_RX = re.compile(r"^(\s*)[-*]\s+", re.MULTILINE)
+# <step N> markers the model emits to signal progress through its plan —
+# rendered as a visible 'on step N' header so the user sees what's happening.
+_MD_STEP_RX = re.compile(r"<step\s+(\d+)(?:\s*/\s*(\d+))?\s*>", re.IGNORECASE)
 _MD_LINK_RX = re.compile(r"\[([^\]\n]+)\]\(([^)\s]+)\)")
 
 
@@ -175,6 +178,15 @@ def render_markdown(text: str) -> str:
 
     # Bullets.
     out = _MD_BULLET_RX.sub(lambda m: m.group(1) + color("• ", TEAL), out)
+
+    # Step markers: '<step 2>' becomes a styled '▸ step 2', '<step 2/4>'
+    # becomes '▸ step 2 of 4'. Wrapped in newlines so they always read as
+    # their own visible line even if the model puts them inline.
+    def _step(m: "re.Match[str]") -> str:
+        n, total = m.group(1), m.group(2)
+        label = f"▸ step {n} of {total}" if total else f"▸ step {n}"
+        return "\n" + color(label, TEAL_BRIGHT + BOLD) + "\n"
+    out = _MD_STEP_RX.sub(_step, out)
 
     # Bold and italic. (Order matters — bold first.)
     out = _MD_BOLD_RX.sub(lambda m: color(m.group(1), BOLD), out)

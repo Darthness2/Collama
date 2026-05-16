@@ -277,6 +277,14 @@ Operating principles:
 - Plan ONCE per turn. Emit <plan>...</plan> at the START of your first
   reply on a non-trivial task — never before every tool call. After the
   initial plan, just call tools.
+- As you work through the plan, emit a step marker before starting each
+  step's actions, in this exact form:
+
+      <step 2/4>
+
+  (where the first number is the current step and the second is total).
+  The harness renders this as a visible "▸ step 2 of 4" header so the
+  user can see live which step you're on. Emit ONE marker per step.
 - Be concise. Don't ask for file contents — read them. Don't guess code
   — verify.
 - One step at a time: call a tool, observe, decide.
