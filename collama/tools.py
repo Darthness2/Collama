@@ -1829,10 +1829,65 @@ def all_tool_schemas(enabled_groups: set[str] | None = None) -> list[dict]:
     return [s for s in schemas if s.get("function", {}).get("name") in allowed]
 
 
+# Common shortened names that small models reach for. Keep this map tight —
+# only well-known synonyms; ambiguous abbreviations should NOT be aliased.
+TOOL_ALIASES: dict[str, str] = {
+    "read":         "read_file",
+    "open":         "read_file",
+    "view":         "read_file",
+    "cat":          "read_file",
+    "write":        "write_file",
+    "create":       "write_file",
+    "edit":         "edit_file",
+    "patch":        "edit_file",
+    "replace":      "edit_file",
+    "ls":           "list_dir",
+    "list":         "list_dir",
+    "dir":          "list_dir",
+    "search":       "grep",
+    "find":         "glob",
+    "bash":         "run_bash",
+    "shell":        "run_bash",
+    "exec":         "run_bash",
+    "run":          "run_bash",
+    "ps":           "run_bash",
+    "cd":           "set_workspace",
+    "fetch":        "web_fetch",
+    "curl":         "web_fetch",
+    "wget":         "web_fetch",
+    "search_web":   "web_search",
+    "todo":         "todo_write",
+    "todos":        "todo_write",
+}
+
+
 def dispatch(name: str, args: dict, ctx: ToolContext) -> str:
-    fn = _all_tools().get(name)
+    all_tools = _all_tools()
+    fn = all_tools.get(name)
     if fn is None:
-        return f"ERROR: unknown tool '{name}'"
+        # Try a direct alias mapping first — silent fix for common shortened
+        # names like 'read', 'cat', 'ls'. Logs a faint note in the result so
+        # the model learns the canonical name.
+        canonical = TOOL_ALIASES.get(name.lower())
+        if canonical and canonical in all_tools:
+            result = all_tools[canonical](args, ctx)
+            if isinstance(result, str) and not result.startswith("ERROR"):
+                result = f"[note: '{name}' is an alias for '{canonical}' — use '{canonical}' next time]\n{result}"
+            return result
+        # No alias — suggest the closest matching name(s) so the model can
+        # self-correct on the next call instead of looping on the same typo.
+        # Pool includes alias keys so 'reed' can land on 'read'/'read_file'.
+        import difflib
+        pool = list(all_tools.keys()) + list(TOOL_ALIASES.keys())
+        suggestions = difflib.get_close_matches(name.lower(), pool, n=3, cutoff=0.4)
+        # Resolve any alias matches to their canonical names + dedupe.
+        canonical_suggestions: list[str] = []
+        for s in suggestions:
+            c = TOOL_ALIASES.get(s, s)
+            if c in all_tools and c not in canonical_suggestions:
+                canonical_suggestions.append(c)
+        hint = f"  Did you mean: {', '.join(canonical_suggestions)}?" if canonical_suggestions else ""
+        return f"ERROR: unknown tool '{name}'.{hint}  Use /tools to see the full list."
     try:
         return fn(args, ctx)
     except KeyError as e:
