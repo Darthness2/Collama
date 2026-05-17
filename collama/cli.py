@@ -710,16 +710,31 @@ def repl(agent: Agent, cfg: dict) -> int:
                 # change takes effect immediately (the old code only wrote
                 # to config; the agent kept using its constructed value).
                 ALIASES = {
+                    # ollama.X aliases that map to a top-level config key
                     "ollama.temperature": "temperature",
                     "ollama.yolo": "yolo",
                     "ollama.tool_groups": "tool_groups",
+                    # Bare names that should canonicalize under ollama.*
+                    "num_ctx":               "ollama.num_ctx",
+                    "stream":                "ollama.stream",
+                    "keep_alive":            "ollama.keep_alive",
+                    "compact_schemas":       "ollama.compact_schemas",
+                    "read_timeout":          "ollama.read_timeout",
+                    "nonstream_read_timeout":"ollama.nonstream_read_timeout",
+                    "connect_timeout":       "ollama.connect_timeout",
+                    "host":                  "host",  # already top-level
+                    # plain aliases
+                    "temp":                  "temperature",
                 }
                 key = ALIASES.get(arg1, arg1)
                 config.set_value(cfg, key, v)
                 config.save(cfg)
                 applied_live = _apply_setting_live(agent, key, v)
                 _apply_to_agent(agent, cfg)
-                live_note = "  → applied live" if applied_live else "  → config only (takes effect next session for this key)"
+                if applied_live:
+                    live_note = "  → applied live · /preset save to lock it for this model"
+                else:
+                    live_note = "  → config only (unknown key; takes effect next session if recognized then)"
                 ui.info(f"set {key} = {v}{live_note}")
                 continue
             if cmd == "login":
