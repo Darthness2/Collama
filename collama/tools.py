@@ -75,19 +75,23 @@ def t_read_file(args: dict, ctx: ToolContext) -> str:
     if not p.is_file():
         return f"ERROR: not a file: {path}"
 
-    # Per-turn cache — if this exact (path, start, end) was already read this
-    # turn, return the cached result with a nudge. Stops the 'read the same
-    # file 6 times' loop that small models fall into.
-    cache_key = (str(p.resolve()), int(start), -1 if end is None else int(end))
+    # Per-turn cache — keyed on PATH ONLY so the model can't bypass it by
+    # passing slightly different line ranges each call. The cached content
+    # is the full file (or whatever was read first); the model has it in
+    # context already and should scroll back, not re-read.
+    abs_path = str(p.resolve())
     cache = ctx.read_cache if isinstance(ctx.read_cache, dict) else None
-    if cache is not None and cache_key in cache:
-        cached = cache[cache_key]
-        first = cached.splitlines()[0] if cached else ""
+    state = getattr(ctx, "state", None)
+    already_read = (
+        (cache is not None and abs_path in cache)
+        or (state is not None and abs_path in getattr(state, "files_read", set()))
+    )
+    if already_read:
         return (
-            f"[CACHED — you already read this file earlier in this turn. "
-            f"Scroll back instead of re-reading. If you need different lines, "
-            f"pass start_line/end_line.]\n{first}\n…\n"
-            f"(use what you have to act, or call edit_file now)"
+            f"[CACHED — you already read {path} earlier in this turn. "
+            f"The full content is in your context above; SCROLL BACK and use it. "
+            f"Do NOT re-read this file with any args. Act now (edit_file, "
+            f"write_file, or give the user a final answer).]"
         )
 
     try:
@@ -102,7 +106,11 @@ def t_read_file(args: dict, ctx: ToolContext) -> str:
     header = f"{path}  ({len(lines)} lines)"
     out = _truncate(f"{header}\n{numbered}")
     if cache is not None:
-        cache[cache_key] = out
+        cache[abs_path] = out
+    if state is not None:
+        files_read = set(getattr(state, "files_read", set()) or set())
+        files_read.add(abs_path)
+        state.update(files_read=files_read)
     return out
 
 
@@ -126,12 +134,19 @@ def _record_edit(ctx: ToolContext, path: Path, before: str, after: str, op: str)
         })
         del hist[:-MAX_EDIT_HISTORY]
         state.update(edit_history=hist)
+    rp = str(path.resolve())
     cache = getattr(ctx, "read_cache", None)
     if isinstance(cache, dict):
-        rp = str(path.resolve())
+        cache.pop(rp, None)
+        # also drop any legacy tuple-keyed entries (older versions of the cache)
         for k in list(cache):
             if isinstance(k, tuple) and k and k[0] == rp:
                 del cache[k]
+    if state is not None:
+        files_read = set(getattr(state, "files_read", set()) or set())
+        if rp in files_read:
+            files_read.discard(rp)
+            state.update(files_read=files_read)
 
 
 def t_write_file(args: dict, ctx: ToolContext) -> str:
@@ -329,10 +344,24 @@ def t_list_dir(args: dict, ctx: ToolContext) -> str:
 
 
 def t_grep(args: dict, ctx: ToolContext) -> str:
-    pattern = args["pattern"]
+    pattern = args.get("pattern") or args.get("query") or args.get("regex")
+    if not pattern:
+        return "ERROR: missing argument 'pattern'"
     path = args.get("path", ".")
     case_insensitive = bool(args.get("case_insensitive", False))
     p = _resolve(path, ctx.root)
+
+    # Refuse absurdly broad targets — a grep across the user's whole home dir
+    # eats minutes and floods the context with irrelevant matches (e.g. node
+    # node_modules, ~/.cache/huggingface). The model must narrow the search.
+    home = Path.home().resolve()
+    target = p.resolve()
+    if target == home or target == Path(home.anchor):
+        return (
+            f"ERROR: grep target {p} is your home directory — too broad. "
+            f"Specify a narrower path (a project subdirectory). For example: "
+            f"grep pattern='{pattern}' path='{home}/<project>'."
+        )
 
     # Fast path: if ripgrep is installed, use it. Way faster than Python regex
     # walks on big trees, and it respects .gitignore by default.
@@ -360,11 +389,20 @@ def t_grep(args: dict, ctx: ToolContext) -> str:
     skip_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"}
     matches: list[str] = []
     targets = [p] if p.is_file() else list(p.rglob("*")) if p.is_dir() else []
+    scanned = 0
+    MAX_SCAN = 2000  # files to crack open before giving up; protects against home-dir-wide greps
     for f in targets:
         if not f.is_file():
             continue
         if any(part in skip_dirs for part in f.parts):
             continue
+        # Skip noisy cache/data dirs the model rarely cares about.
+        if any(s in f.parts for s in (".cache", "site-packages", ".tox", ".pytest_cache")):
+            continue
+        scanned += 1
+        if scanned > MAX_SCAN:
+            matches.append(f"…[scanned {MAX_SCAN}+ files, stopping — narrow the path]")
+            return _truncate("\n".join(matches))
         try:
             with f.open("r", errors="replace") as fp:
                 for i, line in enumerate(fp, 1):
@@ -914,12 +952,22 @@ def t_notebook_edit(args: dict, ctx: ToolContext) -> str:
 
 def t_ask_user_question(args: dict, ctx: ToolContext) -> str:
     """AskUserQuestionTool — pause and ask the user."""
-    question = args["question"]
+    question = args.get("question") or args.get("prompt") or args.get("q")
+    if not question:
+        return "ERROR: missing argument 'question'"
     options = args.get("options") or []
     if ctx.yolo:
         return "ERROR: cannot ask user in yolo mode"
-    print()
     from . import ui
+    # CRITICAL: stop any active spinner before reading input — otherwise the
+    # spinner thread keeps redrawing the line and clobbers what the user is
+    # typing. Same reason terminal_resolver does this for approval prompts.
+    ui.stop_all_spinners()
+    import sys as _sys
+    if _sys.stdout.isatty():
+        _sys.stdout.write("\033[?25h")  # show cursor
+        _sys.stdout.flush()
+    print()
     ui.warn("? " + question)
     for i, opt in enumerate(options, 1):
         print(f"  {i}. {opt}")

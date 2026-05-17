@@ -66,6 +66,11 @@ class AppState:
     # tells the model to switch to write_file.
     edit_fails: dict = field(default_factory=dict)
 
+    # Per-turn set of absolute paths the model has already read this turn —
+    # a path-only fallback for the read cache. Catches the case where the
+    # model varies line-range args to bypass the dict cache.
+    files_read: set[str] = field(default_factory=set)
+
     # per-model facts learned at runtime (e.g. tools_supported)
     models: dict[str, dict] = field(default_factory=dict)
 

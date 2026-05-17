@@ -230,6 +230,17 @@ def repl(agent: Agent, cfg: dict) -> int:
     # (Ollama's keep_alive can leave it loaded between Collama runs).
     _check_vram_after_turn(agent)
 
+    # Workspace warning: a workspace set to the home dir means grep / list_dir
+    # walk the entire user profile (cache dirs, downloads, etc.) — the model
+    # loses focus and bails on /ask-like questions. Nudge the user to /cd into
+    # a specific project before doing real work.
+    if str(agent.state.workspace).rstrip("\\/") == str(Path.home()).rstrip("\\/"):
+        ui.warn(
+            f"workspace is your home dir ({agent.state.workspace}) — the model "
+            f"will struggle to focus. /cd into a project, launch collama with "
+            f"-C <project>, or @path your file in the prompt for sharper results."
+        )
+
     prompt = Prompt()
     if prompt.status_note:
         ui.warn(prompt.status_note)

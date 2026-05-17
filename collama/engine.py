@@ -62,7 +62,7 @@ from .tools import ToolContext, all_tool_schemas, dispatch
 
 
 MAX_TOOL_ITERATIONS = 1000
-LOOP_THRESHOLD = 3
+LOOP_THRESHOLD = 2  # small models loop hard; be aggressive
 COMPACT_TOKENS = 12000
 COMPACT_KEEP_RECENT = 12
 
@@ -627,9 +627,15 @@ class QueryEngine:
         self._recent_results = []
         self._abort_turn = False
         self._read_cache = {}
-        # Reset per-file edit-failure counter at the start of each turn.
+        # Reset per-turn state: edit-failure map AND files_read set, so cache
+        # nudges fire afresh per user message.
+        resets = {}
         if self.state.edit_fails:
-            self.state.update(edit_fails={})
+            resets["edit_fails"] = {}
+        if self.state.files_read:
+            resets["files_read"] = set()
+        if resets:
+            self.state.update(**resets)
 
         # processUserInput()
         user_msg = process_user_input(prompt, workspace=self.state.workspace, home=self.state.home)
