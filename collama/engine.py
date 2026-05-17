@@ -825,6 +825,19 @@ class QueryEngine:
             yield from self._execute_and_record(calls)
 
             if self._abort_turn:
+                # Salvage: surface the model's last substantive narration so
+                # the user actually sees the diagnosis the model worked out
+                # before it got stuck in a re-read loop. Way better than
+                # 'Stopped' with no content.
+                salvaged = self._last_assistant_narration()
+                if salvaged:
+                    yield Message("assistant", {"text": (
+                        salvaged
+                        + "\n\n"
+                        + "_(I got stuck re-reading instead of acting on this. "
+                          "Tell me to '/retry' and just say 'apply that fix' "
+                          "to push it through.)_"
+                    )})
                 yield Message("done", {
                     "text": "Stopped: the model was stuck repeating the same tool call. "
                             "Try /retry, rephrase the request, or /new for a fresh context.",
@@ -949,6 +962,26 @@ class QueryEngine:
             })
             return True
         return False
+
+    def _last_assistant_narration(self) -> str:
+        """Find the most recent assistant message in this turn whose content
+        is substantive narration (not a bare tool call, not steer/control
+        text, not stripped <plan>/<think>). Used to salvage the model's last
+        useful thought when a loop forces us to abort the turn."""
+        for m in reversed(self.messages):
+            if m.get("role") != "assistant":
+                continue
+            content = (m.get("content") or "").strip()
+            # Strip any leftover <plan>/<think> blocks for a cleaner readout.
+            content = _PLAN_RX.sub("", content)
+            content = _THINK_RX.sub("", content).strip()
+            if not content:
+                continue
+            # Skip messages that are nothing but a JSON tool-call (no prose).
+            if content.startswith("{") and content.endswith("}"):
+                continue
+            return content
+        return ""
 
     def _result_loop_count(self, name: str, result: str) -> int:
         """Track repeated identical (tool, result) pairs this turn — the
