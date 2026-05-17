@@ -25,6 +25,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/insecure", "toggle SSL verification (school/corp MITM proxies)"),
     ("/diag", "print model / workspace / tools / github status"),
     ("/model", "show or switch model (saved)"),
+    ("/preset", "show/save/clear per-model presets"),
     ("/models", "list installed Ollama models"),
     ("/host", "show or change Ollama host (saved)"),
     ("/config", "show current config (token redacted)"),

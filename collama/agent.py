@@ -32,6 +32,7 @@ class Agent:
         on_tools_disabled: Optional[Callable] = None,
         config: Optional[dict] = None,
         stream: bool = True,
+        compact_schemas: bool = True,
     ) -> None:
         self.state = AppState(
             workspace=root,
@@ -48,6 +49,7 @@ class Agent:
             config=config,
             permission_resolver=terminal_resolver,
             stream=stream,  # stream tokens live so generation is visible
+            compact_schemas=compact_schemas,
         )
         self.client = client
         self.on_turn_complete = on_turn_complete

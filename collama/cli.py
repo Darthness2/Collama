@@ -47,7 +47,8 @@ Slash commands:
   /stream on|off          toggle token streaming (turn off on networks that break chunked streams)
   /insecure on|off        toggle SSL verification for HTTPS calls (school/corp MITM proxies)
   /diag                   print model / workspace / home / tools / github status
-  /model [name]           show or switch model
+  /model [name]           show or switch model (auto-applies saved /preset)
+  /preset [save|clear]    show/save/clear per-model presets (num_ctx, temp, groups…)
   /models                 list locally installed Ollama models
   /host [url]             show or change the Ollama host
   /config                 show current config (token redacted)
@@ -118,6 +119,31 @@ def _apply_to_agent(agent: Agent, cfg: dict) -> None:
     agent.ctx.github_token = config.get_value(cfg, "github.token")
     agent.ctx.yolo = bool(cfg.get("yolo", agent.ctx.yolo))
     agent.ctx.insecure_ssl = bool(config.get_value(cfg, "insecure_ssl", False))
+
+
+def _apply_model_presets(cfg: dict, agent: Agent, model: str) -> list[str]:
+    """Apply saved presets for `model` to the live agent. Returns the list of
+    keys that were applied (for logging). Quietly ignores keys that aren't
+    real settings."""
+    presets = config.get_value(cfg, f"models.{model}.presets", {}) or {}
+    applied: list[str] = []
+    if "num_ctx" in presets:
+        agent.client.num_ctx = int(presets["num_ctx"])
+        applied.append(f"num_ctx={agent.client.num_ctx}")
+    if "temperature" in presets:
+        agent.engine.temperature = float(presets["temperature"])
+        applied.append(f"temp={agent.engine.temperature}")
+    if "stream" in presets:
+        agent.engine.stream = bool(presets["stream"])
+        applied.append(f"stream={agent.engine.stream}")
+    if "compact_schemas" in presets:
+        agent.engine.compact_schemas = bool(presets["compact_schemas"])
+        applied.append(f"compact_schemas={agent.engine.compact_schemas}")
+    if "tool_groups" in presets and isinstance(presets["tool_groups"], list):
+        agent.state.tool_groups = set(presets["tool_groups"])
+        agent.engine.refresh_system_prompt()
+        applied.append(f"tool_groups={sorted(agent.state.tool_groups)}")
+    return applied
 
 
 def _autosave(session: dict, agent: Agent) -> None:
@@ -504,6 +530,16 @@ def repl(agent: Agent, cfg: dict) -> int:
                 ui.info(f"input:    {prompt.backend}"
                         + ("" if prompt.backend == "prompt_toolkit"
                            else "  (install prompt_toolkit for the / command popup)"))
+                # Per-model profile from the lightweight probe.
+                profile = config.get_value(cfg, f"models.{agent.model}.profile", {}) or {}
+                if profile:
+                    n = profile.get("native_tool_calls", 0)
+                    s = profile.get("salvaged_tool_calls", 0)
+                    total = n + s
+                    if total:
+                        pct = n / total * 100
+                        ui.info(f"profile:  {n} native + {s} salvaged tool calls "
+                                f"({pct:.0f}% native)")
                 continue
             if cmd == "stream":
                 want = arg1.lower() if arg1 else ("off" if agent.engine.stream else "on")
@@ -545,8 +581,43 @@ def repl(agent: Agent, cfg: dict) -> int:
                         config.set_value(cfg, f"models.{arg1}.tools_supported", False)
                         or config.save(cfg)
                     )
+                    # Apply saved per-model presets (num_ctx, temperature,
+                    # tool_groups, stream, compact_schemas) so each model
+                    # remembers its own sweet spot.
+                    applied = _apply_model_presets(cfg, agent, arg1)
                     note = "" if supported else " (no tool support — tool-less)"
-                    ui.info(f"switched to {arg1}{note} (saved)")
+                    preset_note = f" · presets: {', '.join(applied)}" if applied else ""
+                    ui.info(f"switched to {arg1}{note} (saved){preset_note}")
+                continue
+            if cmd == "preset":
+                # /preset           — show current values
+                # /preset save      — snapshot current settings under this model
+                # /preset clear     — drop saved presets for this model
+                sub = arg1.lower() if arg1 else ""
+                if sub == "save":
+                    presets = {
+                        "num_ctx": agent.client.num_ctx,
+                        "temperature": agent.engine.temperature,
+                        "stream": agent.engine.stream,
+                        "compact_schemas": agent.engine.compact_schemas,
+                    }
+                    if agent.state.tool_groups is not None:
+                        presets["tool_groups"] = sorted(agent.state.tool_groups)
+                    config.set_value(cfg, f"models.{agent.model}.presets", presets)
+                    config.save(cfg)
+                    ui.info(f"saved presets for {agent.model}: {presets}")
+                elif sub == "clear":
+                    config.set_value(cfg, f"models.{agent.model}.presets", {})
+                    config.save(cfg)
+                    ui.info(f"cleared presets for {agent.model}")
+                else:
+                    presets = config.get_value(cfg, f"models.{agent.model}.presets", {}) or {}
+                    if not presets:
+                        ui.info(f"no presets saved for {agent.model}. /preset save to snapshot current settings.")
+                    else:
+                        ui.info(f"presets for {agent.model}:")
+                        for k, v in presets.items():
+                            print(f"    {k} = {v}")
                 continue
             if cmd == "models":
                 try:
@@ -872,6 +943,13 @@ def main(argv: list[str] | None = None) -> int:
             signal.signal(sig, lambda *_: (_shutdown_unload(), sys.exit(0)))
         except (ValueError, OSError):
             pass
+
+    # Apply per-model presets (num_ctx, temperature, tool_groups, etc.) for
+    # whichever model is loaded at startup, so each model remembers its
+    # tuning across sessions.
+    applied = _apply_model_presets(cfg, agent, agent.model)
+    if applied:
+        ui.info(f"applied {agent.model} presets: {', '.join(applied)}")
 
     if args.prompt:
         agent.turn(args.prompt)

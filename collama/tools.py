@@ -1868,13 +1868,51 @@ def _tool_to_group() -> dict[str, str]:
     return out
 
 
-def all_tool_schemas(enabled_groups: set[str] | None = None) -> list[dict]:
-    """Return tool schemas for the enabled groups (DEFAULT_GROUPS if None)."""
+def _compact_schema(schema: dict) -> dict:
+    """Return a copy of a tool schema with descriptions trimmed to one line.
+
+    Most tool/param descriptions are paragraphs explaining edge cases — the
+    model only needs the first line to know what the tool does and how to
+    call it. Trimming saves ~40% of the per-request tool prompt overhead,
+    which is one of the biggest wins on slow local hardware.
+    """
+    fn = schema.get("function", {}) or {}
+    desc = (fn.get("description") or "").strip()
+    short_desc = desc.splitlines()[0].strip() if desc else ""
+    if len(short_desc) > 140:
+        short_desc = short_desc[:137] + "…"
+    new_fn = {**fn, "description": short_desc}
+    params = new_fn.get("parameters") or {}
+    if isinstance(params, dict) and isinstance(params.get("properties"), dict):
+        # Drop parameter `description` fields entirely. Param names like
+        # 'path', 'pattern', 'command' are self-explanatory; the model
+        # knows what to put there. Saves the bulk of the prompt tokens.
+        new_props = {}
+        for pname, pspec in params["properties"].items():
+            if isinstance(pspec, dict):
+                new_props[pname] = {k: v for k, v in pspec.items() if k != "description"}
+            else:
+                new_props[pname] = pspec
+        new_fn["parameters"] = {**params, "properties": new_props}
+    return {**schema, "function": new_fn}
+
+
+def all_tool_schemas(
+    enabled_groups: set[str] | None = None,
+    compact: bool = True,
+) -> list[dict]:
+    """Return tool schemas for the enabled groups (DEFAULT_GROUPS if None).
+
+    `compact=True` (default) trims every description to its first line —
+    saves substantial prompt-eval cost on local models. Pass False to keep
+    the verbose docstrings if a model is struggling without them.
+    """
     from .github import GITHUB_TOOL_SCHEMAS
     groups = DEFAULT_GROUPS if enabled_groups is None else set(enabled_groups)
     allowed = {n for g in groups for n in TOOL_GROUPS.get(g, ())}
     schemas = TOOL_SCHEMAS + GITHUB_TOOL_SCHEMAS
-    return [s for s in schemas if s.get("function", {}).get("name") in allowed]
+    filtered = [s for s in schemas if s.get("function", {}).get("name") in allowed]
+    return [_compact_schema(s) for s in filtered] if compact else filtered
 
 
 # Common shortened names that small models reach for. Keep this map tight —

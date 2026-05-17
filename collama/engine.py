@@ -576,11 +576,13 @@ class QueryEngine:
         session_id: str | None = None,
         permission_resolver: Resolver | None = None,
         stream: bool = True,
+        compact_schemas: bool = True,
     ) -> None:
         self.client = client
         self.state = state
         self.model = model
         self.temperature = temperature
+        self.compact_schemas = compact_schemas
         self.config = config
         self.session_id = session_id
         self.stream = stream
@@ -647,11 +649,31 @@ class QueryEngine:
         self.messages.append(user_msg)
 
         # Manage context BEFORE sending: snip + collapse + autoCompact.
+        # Pre-check token budget so we can tell the user we're about to
+        # compact (otherwise compaction looks invisible until it finishes,
+        # and the LLM-summarization variant was slow enough to feel like
+        # a hang).
+        _pre = sum(len(str(m.get("content") or "")) // 4 for m in self.messages)
+        will_compact = _pre > COMPACT_TOKENS
+        if will_compact:
+            yield Message("info", {
+                "text": f"compacting context (~{_pre:,} → ≤{COMPACT_TOKENS:,} tokens)…"
+            })
+        # LLM-summarization is slow (it's an extra Ollama round-trip on
+        # the model that's already struggling). The deterministic bulletize
+        # fallback is plenty for context tracking, so we default to that.
+        # Power users can flip ollama.llm_summarize on if they want richer
+        # summaries at the cost of speed.
+        summarize_fn = (
+            self._summarize_with_model
+            if (self.config and self.config.get("ollama", {}).get("llm_summarize"))
+            else None
+        )
         for r in manage_context(
             self.messages,
             max_tokens=COMPACT_TOKENS,
             keep_recent=COMPACT_KEEP_RECENT,
-            summarize_with_model=self._summarize_with_model,
+            summarize_with_model=summarize_fn,
         ):
             if r.triggered:
                 yield Message("compact", {
@@ -777,6 +799,19 @@ class QueryEngine:
                 tool_calls=msg.get("tool_calls") or [],
             )
 
+            # Lightweight model probe: tally native vs salvaged tool calls so
+            # we can build a per-model behavior profile and (later) auto-tune
+            # things like which JSON format to suggest in the system prompt.
+            native_tc = len(msg.get("tool_calls") or [])
+            salvaged_tc = 1 if (not native_tc and _extract_tool_call(cleaned)) else 0
+            if self.config is not None and (native_tc or salvaged_tc):
+                profile_key = f"models.{self.model}.profile"
+                profile = dict(self.config.get("models", {}).get(self.model, {}).get("profile", {}) or {})
+                profile["native_tool_calls"] = int(profile.get("native_tool_calls", 0)) + native_tc
+                profile["salvaged_tool_calls"] = int(profile.get("salvaged_tool_calls", 0)) + salvaged_tc
+                profile["last_emit_native"] = bool(native_tc)
+                set_value(self.config, profile_key, profile)
+
             if had_fakes:
                 yield Message("warn", {"text": "model fabricated tool outputs — asking it to retry."})
                 self.messages.append({
@@ -855,7 +890,7 @@ class QueryEngine:
         _StreamGen that the caller iterates; otherwise returns a fully-assembled
         message."""
         api_messages = normalize_messages_for_api(self.messages)
-        tools = all_tool_schemas(self.state.tool_groups) if self.state.tools_enabled else None
+        tools = all_tool_schemas(self.state.tool_groups, compact=self.compact_schemas) if self.state.tools_enabled else None
 
         if yield_deltas and hasattr(self.client, "chat_stream_assembled"):
             gen = self.client.chat_stream_assembled(
@@ -880,7 +915,7 @@ class QueryEngine:
         """Single non-streaming request — used as a fallback when a streamed
         response breaks mid-flight (chunk parse errors, proxy interference)."""
         api_messages = normalize_messages_for_api(self.messages)
-        tools = all_tool_schemas(self.state.tool_groups) if self.state.tools_enabled else None
+        tools = all_tool_schemas(self.state.tool_groups, compact=self.compact_schemas) if self.state.tools_enabled else None
         try:
             with ui.Spinner("retrying (no stream)"):
                 return self.client.chat(

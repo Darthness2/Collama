@@ -19,6 +19,7 @@ Helpers:
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 BOUNDARY_MARKER = "<<COMPACT_BOUNDARY>>"
@@ -53,15 +54,22 @@ def messages_after_boundary(messages: list[dict]) -> list[dict]:
 
 # --------- snipCompact ---------------------------------------------------
 
-def snip_compact(messages: list[dict]) -> int:
-    """Drop empty / duplicate-consecutive messages. Returns count removed."""
+_SNIP_THINK_RX = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL | re.IGNORECASE)
+
+
+def snip_compact(messages: list[dict], keep_recent_think: int = 2) -> int:
+    """Drop empty / duplicate-consecutive messages AND strip <think>…</think>
+    blocks from assistant messages older than the last `keep_recent_think`
+    assistant turns. Thinking is reasoning, not decisions — keeping it forever
+    just bloats the context. Returns the number of changes made.
+    """
     kept: list[dict] = []
     removed = 0
     for m in messages:
-        # Empty assistant messages with no tool_calls are zombies.
         role = m.get("role")
         content = (m.get("content") or "").strip()
         tool_calls = m.get("tool_calls") or []
+        # Empty assistant messages with no tool_calls are zombies.
         if role == "assistant" and not content and not tool_calls:
             removed += 1
             continue
@@ -70,6 +78,17 @@ def snip_compact(messages: list[dict]) -> int:
             removed += 1
             continue
         kept.append(m)
+    # Strip <think> blocks from older assistant messages.
+    asst_idxs = [i for i, m in enumerate(kept) if m.get("role") == "assistant"]
+    cutoff = len(asst_idxs) - keep_recent_think
+    if cutoff > 0:
+        for i in asst_idxs[:cutoff]:
+            c = kept[i].get("content") or ""
+            if "<think" in c.lower():
+                new_c = _SNIP_THINK_RX.sub("", c).strip()
+                if new_c != c:
+                    kept[i]["content"] = new_c
+                    removed += 1
     if removed:
         messages.clear()
         messages.extend(kept)
