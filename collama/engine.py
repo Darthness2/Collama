@@ -311,8 +311,15 @@ How to use the tools:
       from memory or paraphrase.
     * If old_string isn't found, the harness shows the closest matching
       region. Use THAT exact text as your new old_string.
-    * If edit_file fails twice on the same file, STOP using it on that
-      file and switch to write_file with the full new contents.
+    * If edit_file fails twice on the same file, STOP using it. Call
+      replace_lines(path, start_line, end_line, new_content) instead —
+      it's a surgical line-range edit that doesn't depend on string
+      matching, so it sidesteps every encoding/quote/indent issue.
+      Use grep to find the line numbers first, then call replace_lines.
+    * Do NOT escape into run_bash to do edits with a Python script. The
+      harness can't track those edits for /undo, and small models tend
+      to write read-only `f.read()` scripts that look like progress but
+      change nothing.
 - write_file: use for new files, or when edit_file fails twice on an
   existing file. Always read the existing file first so you preserve
   the parts you aren't changing.

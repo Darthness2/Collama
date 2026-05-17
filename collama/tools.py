@@ -289,13 +289,20 @@ def t_edit_file(args: dict, ctx: ToolContext) -> str:
             if fail_count >= 2:
                 msg += (
                     f"\n\nESCALATE: this is failure #{fail_count} on {path}. STOP using "
-                    f"edit_file on this file. Switch to write_file: read the full file, "
-                    f"build the complete new content, and write it back in one call."
+                    f"edit_file on this file. You have TWO good options:\n"
+                    f"  (a) replace_lines(path, start_line, end_line, new_content) — "
+                    f"surgical line-range edit that doesn't depend on exact string "
+                    f"matching. Use grep first to find the line numbers, then call this. "
+                    f"This is the right answer when you keep failing on encoding or "
+                    f"whitespace mismatch.\n"
+                    f"  (b) write_file with the full new content if the change spans "
+                    f"too much of the file."
                 )
             else:
                 msg += (
-                    f"\n\nIf this fails again, give up on edit_file for this file and "
-                    f"call write_file with the complete new contents."
+                    f"\n\nIf this fails again, switch to replace_lines(path, start_line, "
+                    f"end_line, new_content) — it does a surgical line-range edit and "
+                    f"sidesteps every string-matching problem."
                 )
             return msg
         i, j = span
@@ -308,6 +315,47 @@ def t_edit_file(args: dict, ctx: ToolContext) -> str:
     _record_edit(ctx, p, raw, new_text, "edit")
     adds, dels = _diff.stats(text, new_text)
     return f"OK: edited {path} +{adds} -{dels}"
+
+
+def t_replace_lines(args: dict, ctx: ToolContext) -> str:
+    """Surgical line-range replacement — bypasses string matching entirely.
+
+    Use when edit_file fails because of encoding / quote / indentation
+    drift. Reads the file, replaces lines [start_line, end_line] (1-indexed,
+    inclusive) with `new_content`, writes it back. Records to /undo history.
+    """
+    from . import diff as _diff
+    path = args["path"]
+    start = args.get("start_line")
+    end = args.get("end_line")
+    new_content = args.get("new_content", "")
+    if start is None or end is None:
+        return "ERROR: replace_lines requires start_line and end_line (1-indexed, inclusive)"
+    p = _resolve(path, ctx.root)
+    if not p.exists():
+        return f"ERROR: file not found: {path}"
+    raw = _read_text_robust(p)
+    lines = raw.splitlines(keepends=True)
+    s = max(1, int(start)) - 1
+    e = min(len(lines), int(end))
+    if s >= len(lines):
+        return f"ERROR: start_line {start} is past end of file ({len(lines)} lines)"
+    if e < s + 1:
+        return f"ERROR: end_line ({end}) must be >= start_line ({start})"
+    if not ctx.confirm("file edit (replace_lines)", f"{path}: lines {s + 1}-{e}"):
+        return "ERROR: user denied edit"
+    # Preserve the file's original line ending if possible.
+    eol = "\r\n" if (raw and "\r\n" in raw and "\n" in raw and raw.count("\r\n") >= raw.count("\n") / 2) else "\n"
+    new_chunk = new_content
+    if not new_chunk.endswith(("\n", "\r")):
+        new_chunk += eol
+    # Splice
+    new_lines = lines[:s] + [new_chunk] + lines[e:]
+    new_text = "".join(new_lines)
+    p.write_text(new_text)
+    _record_edit(ctx, p, raw, new_text, "replace_lines")
+    adds, dels = _diff.stats(raw, new_text)
+    return f"OK: replaced {path}:{s + 1}-{e} +{adds} -{dels}"
 
 
 def t_list_dir(args: dict, ctx: ToolContext) -> str:
@@ -1291,6 +1339,7 @@ TOOLS: dict[str, ToolFn] = {
     "read_file": t_read_file,
     "write_file": t_write_file,
     "edit_file": t_edit_file,
+    "replace_lines": t_replace_lines,
     "list_dir": t_list_dir,
     "grep": t_grep,
     "run_bash": t_run_bash,
@@ -1398,6 +1447,23 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "replace_all": {"type": "boolean"},
                 },
                 "required": ["path", "old_string", "new_string"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "replace_lines",
+            "description": "Surgical line-range replacement. Use when edit_file fails on string matching (encoding / quote / indent drift). Lines are 1-indexed, inclusive on both ends. Use grep to find the lines first, then call this.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "start_line": {"type": "integer"},
+                    "end_line": {"type": "integer"},
+                    "new_content": {"type": "string"},
+                },
+                "required": ["path", "start_line", "end_line", "new_content"],
             },
         },
     },
@@ -1824,8 +1890,8 @@ def _all_tools() -> dict[str, ToolFn]:
 # cost on a local model. Groups let the heavy/rarely-used ones be opt-in.
 TOOL_GROUPS: dict[str, list[str]] = {
     "core": [
-        "read_file", "write_file", "edit_file", "list_dir", "grep",
-        "run_bash", "set_workspace",
+        "read_file", "write_file", "edit_file", "replace_lines",
+        "list_dir", "grep", "run_bash", "set_workspace",
     ],
     "search": ["glob", "tool_search", "web_fetch", "web_search"],
     "tasks": [
