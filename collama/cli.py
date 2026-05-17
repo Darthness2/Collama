@@ -66,7 +66,7 @@ Slash commands:
   /save [title]           force-save the current conversation (sets title)
   /rename <new title>     rename the current conversation
   /delete <id|number>     delete a saved conversation
-  /yolo                   toggle auto-approve for tool calls
+  /yolo [on|off]          toggle / set auto-approve for tool calls
   /exit, /quit            leave
 """
 
@@ -797,10 +797,23 @@ def repl(agent: Agent, cfg: dict) -> int:
                     ui.warn("delete failed")
                 continue
             if cmd == "yolo":
-                agent.ctx.yolo = not agent.ctx.yolo
-                cfg["yolo"] = agent.ctx.yolo
+                # /yolo on|off  or  /yolo (toggle)
+                sub = arg1.lower() if arg1 else ""
+                if sub in ("on", "true", "1", "yes"):
+                    want = True
+                elif sub in ("off", "false", "0", "no"):
+                    want = False
+                elif sub == "":
+                    want = not agent.state.yolo
+                else:
+                    ui.warn("usage: /yolo on|off  (or /yolo to toggle)")
+                    continue
+                # Write to AppState so future ToolContext objects pick it up
+                # (the agent.ctx property builds a fresh ToolContext each call).
+                agent.state.update(yolo=want)
+                cfg["yolo"] = want
                 config.save(cfg)
-                ui.info(f"yolo: {'ON' if agent.ctx.yolo else 'OFF'}")
+                ui.info(f"yolo: {'ON — no further approval prompts' if want else 'OFF'} (saved)")
                 continue
             if cmd == "retry":
                 if not last_user_input:
