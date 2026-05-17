@@ -212,14 +212,30 @@ def repl(agent: Agent, cfg: dict) -> int:
             return
         st = a.client.model_vram_status(a.model)
         if st and not st["fully_gpu"]:
+            from .ollama_client import _is_apple_silicon
             size_gb = st["size"] / (1024**3)
             cpu_gb = st["cpu_bytes"] / (1024**3)
-            ui.warn(
-                f"{a.model} is {cpu_gb:.1f} GB on CPU "
-                f"({st['cpu_percent']:.0f}% offloaded — total {size_gb:.1f} GB). "
-                f"This is why responses are slow / get truncated. Try a smaller "
-                f"model with /model (qwen2.5-coder:14b fully fits 16 GB)."
-            )
+            pct = st["cpu_percent"]
+            if _is_apple_silicon():
+                # Unified memory: nothing is 'spilled to CPU' the way it is
+                # on a discrete GPU. The Metal/MLX runner does still hit
+                # context-pressure crashes when total resident bytes are
+                # close to system RAM though.
+                ui.warn(
+                    f"{a.model} resident bytes: {size_gb:.1f} GB total "
+                    f"({size_gb - cpu_gb:.1f} GB in the Metal buffer). On "
+                    f"Apple Silicon all memory is unified, so this isn't 'spillover' "
+                    f"per se — but heavy models still cause MLX/Metal context "
+                    f"crashes under pressure. If you see freezes, close other "
+                    f"GPU-using apps (browser, Discord) or try a smaller model."
+                )
+            else:
+                ui.warn(
+                    f"{a.model} is {cpu_gb:.1f} GB on CPU "
+                    f"({pct:.0f}% offloaded — total {size_gb:.1f} GB). "
+                    f"This is why responses are slow / get truncated. Try a smaller "
+                    f"model with /model (qwen2.5-coder:14b fits most 16 GB GPUs)."
+                )
             _warned_offload["shown"] = True
 
     agent.on_turn_complete = _check_vram_after_turn
@@ -463,17 +479,26 @@ def repl(agent: Agent, cfg: dict) -> int:
                 ui.info(f"timeout:  stream {agent.client.read_timeout:.0f}s per-chunk · "
                         f"non-stream {agent.client.nonstream_read_timeout:.0f}s whole-response")
                 status = agent.client.model_vram_status(agent.model)
+                from .ollama_client import _is_apple_silicon
+                mac = _is_apple_silicon()
+                label = "memory" if mac else "vram"
                 if status is None:
-                    ui.info("vram:     model not currently loaded (first turn will load it)")
+                    ui.info(f"{label}:    model not currently loaded (first turn will load it)")
                 elif status["fully_gpu"]:
-                    ui.info(f"vram:     {status['size_vram'] / (1024**3):.1f} GB · fully on GPU ✓")
+                    place = "in Metal buffer (unified)" if mac else "fully on GPU ✓"
+                    ui.info(f"{label}:    {status['size_vram'] / (1024**3):.1f} GB · {place}")
                 else:
                     size_gb = status["size"] / (1024**3)
                     vram_gb = status["size_vram"] / (1024**3)
                     cpu_gb = status["cpu_bytes"] / (1024**3)
-                    ui.warn(f"vram:     {vram_gb:.1f}/{size_gb:.1f} GB on GPU · "
-                            f"{cpu_gb:.1f} GB on CPU ({status['cpu_percent']:.0f}% offloaded — "
-                            f"expect slowness and truncations)")
+                    if mac:
+                        ui.info(f"{label}:    {size_gb:.1f} GB resident · "
+                                f"{vram_gb:.1f} GB in Metal · {cpu_gb:.1f} GB outside "
+                                f"(unified — Metal can still reach it; may pressure under load)")
+                    else:
+                        ui.warn(f"{label}:    {vram_gb:.1f}/{size_gb:.1f} GB on GPU · "
+                                f"{cpu_gb:.1f} GB on CPU ({status['cpu_percent']:.0f}% offloaded — "
+                                f"expect slowness and truncations)")
                 ui.info(f"github:   {'logged in' if agent.ctx.github_token else 'no token'}")
                 ui.info(f"ssl:      {'INSECURE (verification off)' if agent.ctx.insecure_ssl else 'verify enabled'}")
                 ui.info(f"input:    {prompt.backend}"

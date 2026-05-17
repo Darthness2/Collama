@@ -7,6 +7,14 @@ from typing import Any, Iterator
 import requests
 
 
+def _is_apple_silicon() -> bool:
+    """True on Apple Silicon Macs — they have unified memory, so 'size on
+    CPU' from /api/ps doesn't mean a model is spilling off the GPU the way
+    it does on a discrete-VRAM card. Used to tune the warning copy."""
+    import platform
+    return platform.system() == "Darwin" and platform.machine() in ("arm64", "aarch64")
+
+
 def _normalize_host(host: str) -> str:
     """Make `host` into a valid Ollama base URL.
 
