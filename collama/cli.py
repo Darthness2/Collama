@@ -115,6 +115,50 @@ def _redact(cfg: dict) -> dict:
     return out
 
 
+def _apply_setting_live(agent: Agent, key: str, value) -> bool:
+    """Apply a config change to the running agent so /set takes effect now,
+    not next session. Returns True if it landed on something live."""
+    if key == "temperature":
+        try:
+            agent.engine.temperature = float(value)
+            return True
+        except (TypeError, ValueError):
+            return False
+    if key == "ollama.num_ctx":
+        try:
+            agent.client.num_ctx = int(value)
+            return True
+        except (TypeError, ValueError):
+            return False
+    if key == "ollama.stream":
+        agent.engine.stream = bool(value); return True
+    if key == "ollama.keep_alive":
+        agent.client.keep_alive = value; return True
+    if key == "ollama.compact_schemas":
+        agent.engine.compact_schemas = bool(value); return True
+    if key == "ollama.read_timeout":
+        try:
+            agent.client.read_timeout = float(value)
+            return True
+        except (TypeError, ValueError):
+            return False
+    if key == "ollama.nonstream_read_timeout":
+        try:
+            agent.client.nonstream_read_timeout = float(value)
+            return True
+        except (TypeError, ValueError):
+            return False
+    if key == "yolo":
+        agent.state.update(yolo=bool(value)); return True
+    if key == "insecure_ssl":
+        agent.state.update(insecure_ssl=bool(value)); return True
+    if key == "tool_groups" and isinstance(value, list):
+        agent.state.update(tool_groups=set(value))
+        agent.engine.refresh_system_prompt()
+        return True
+    return False
+
+
 def _apply_to_agent(agent: Agent, cfg: dict) -> None:
     agent.ctx.github_token = config.get_value(cfg, "github.token")
     agent.ctx.yolo = bool(cfg.get("yolo", agent.ctx.yolo))
@@ -204,7 +248,12 @@ def _replay_conversation(messages: list[dict], max_turns: int = 12) -> None:
         content = (m.get("content") or "").strip()
         if role == "user":
             # Skip our own injected tool-result / background frames.
-            if content.startswith(("Tool result for ", "[background] ", "[older context")):
+            if content.startswith((
+                "Tool result for ", "[background] ", "[older context",
+                "STOP. You have called",          # loop steer
+                "STOP. Tool outputs are mine",    # fake-outputs steer
+                "You called ", "You have called", # other steer variants
+            )):
                 continue
             print(ui.color("❯ ", ui.TEAL_BRIGHT) + ui.color(content, ui.SURFACE))
         elif role == "assistant":
@@ -645,6 +694,7 @@ def repl(agent: Agent, cfg: dict) -> int:
                 if not arg1 or not arg2:
                     ui.warn("usage: /set <key> <value>")
                     continue
+                # Coerce value
                 v: object = arg2
                 if arg2.lower() in ("true", "false"):
                     v = arg2.lower() == "true"
@@ -653,10 +703,24 @@ def repl(agent: Agent, cfg: dict) -> int:
                         v = float(arg2) if "." in arg2 else int(arg2)
                     except ValueError:
                         pass
-                config.set_value(cfg, arg1, v)
+                # Normalize common keys. 'temperature' is top-level in our
+                # config, not under 'ollama.' — but everyone reaches for
+                # 'ollama.temperature' first. Accept both, store at the
+                # canonical location, and APPLY to the live agent so the
+                # change takes effect immediately (the old code only wrote
+                # to config; the agent kept using its constructed value).
+                ALIASES = {
+                    "ollama.temperature": "temperature",
+                    "ollama.yolo": "yolo",
+                    "ollama.tool_groups": "tool_groups",
+                }
+                key = ALIASES.get(arg1, arg1)
+                config.set_value(cfg, key, v)
                 config.save(cfg)
+                applied_live = _apply_setting_live(agent, key, v)
                 _apply_to_agent(agent, cfg)
-                ui.info(f"set {arg1} = {v}")
+                live_note = "  → applied live" if applied_live else "  → config only (takes effect next session for this key)"
+                ui.info(f"set {key} = {v}{live_note}")
                 continue
             if cmd == "login":
                 if arg1.lower() != "github" or not arg2:

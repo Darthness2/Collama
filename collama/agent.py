@@ -142,6 +142,10 @@ class _RenderState:
     streaming: bool = False        # currently mid-stream (deltas arriving)
     streamed_any: bool = False     # streamed at least one delta this assistant msg
     md: object | None = None       # ui.StreamMarkdown when streaming
+    # Pending tool_call event waiting for its tool_result. We defer drawing
+    # '▸ name  summary' until the result arrives so CACHED read_file events
+    # can suppress BOTH lines (the user shouldn't see internal recovery).
+    pending_tool_call: tuple[str, str] | None = None
 
 
 def _end_stream_line(rs: _RenderState) -> None:
@@ -200,14 +204,25 @@ def render_event(event: Message, rs: _RenderState) -> None:
         else:
             ui.assistant(d["text"])
     elif k == "tool_call":
-        ui.tool_call(d["name"], d["summary"])
+        # Defer the ▸ line — we may want to suppress it entirely if the
+        # result is a cache nudge (pure internal recovery).
+        rs.pending_tool_call = (d["name"], d["summary"])
     elif k == "tool_result":
-        # Special-case file edits: show only the file + colored +adds/-dels,
-        # no inline diff. (The full diff is still available via /diff and
-        # /undo.) Format produced by t_write_file / t_edit_file is:
-        #   "OK: <op> <path> +N -M"
         name = d.get("name") or ""
         result = d.get("result") or ""
+        first_line = d.get("first_line") or ""
+        # If the result is a CACHED nudge, drop BOTH the tool_call line and
+        # the result line. The user already saw the file the first time
+        # around; redundant reads are internal-only.
+        if first_line.startswith("[CACHED"):
+            rs.pending_tool_call = None
+            return
+        # Now flush the pending tool_call (we know the result is real).
+        if rs.pending_tool_call is not None:
+            pname, psummary = rs.pending_tool_call
+            ui.tool_call(pname, psummary)
+            rs.pending_tool_call = None
+        # Special-case file edits: show only the file + colored +adds/-dels.
         if d["ok"] and name in ("write_file", "edit_file"):
             import re as _re_edit
             m = _re_edit.match(r"OK:\s+(\w+)\s+(.+?)\s+\+(\d+)\s+-(\d+)\s*$", result)
@@ -221,7 +236,7 @@ def render_event(event: Message, rs: _RenderState) -> None:
                     + " " + ui.color(f"-{dels}", ui.ERR)
                 )
                 return
-        ui.tool_result(d["first_line"][:160], ok=d["ok"])
+        ui.tool_result(first_line[:160], ok=d["ok"])
     elif k == "info":
         ui.info(d["text"])
     elif k == "warn":
@@ -232,6 +247,11 @@ def render_event(event: Message, rs: _RenderState) -> None:
         strategy = d.get("strategy", "compact")
         ui.info(f"context {strategy}: {d['before']} → {d['after']} approx tokens")
     elif k == "tool_denied":
+        # Flush any pending tool_call line so the denial reads sensibly.
+        if rs.pending_tool_call is not None:
+            pname, psummary = rs.pending_tool_call
+            ui.tool_call(pname, psummary)
+            rs.pending_tool_call = None
         ui.warn(f"permission denied: {d['name']} ({d['reason']})")
     elif k == "done":
         usage = d.get("usage", {})

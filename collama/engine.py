@@ -332,6 +332,13 @@ ACT, DON'T NARRATE. On debug/fix tasks:
   that understanding to make the change in the same turn.
 - After at most 3 exploration tool calls on a fix task, you must either
   ACT or ASK one specific question. Open-ended summarizing is failure.
+- DO NOT paste code blocks in your final answer. The user sees the edit
+  directly via edit_file output ('✓ edited /path/file  +5 -2'); they do
+  NOT need a markdown ``` block showing the same code. Final answers on
+  a fix should be ONE sentence describing what changed and any verify
+  step ('Fixed: timeout wraps _ticker_exists with 5s budget. Try /ask
+  AAPL again.'). Save code blocks only for genuine explanations the
+  user asked for ("show me the function").
 
 Debugging discipline — when a command fails or code misbehaves:
 1. READ THE ACTUAL ERROR. run_bash marks results PASS/FAIL and, on
@@ -814,8 +821,10 @@ class QueryEngine:
 
             if had_fakes:
                 yield Message("warn", {"text": "model fabricated tool outputs — asking it to retry."})
+                # role=system so this never shows in /resume replay (and the
+                # model treats it as an instruction, not user content).
                 self.messages.append({
-                    "role": "user",
+                    "role": "system",
                     "content": (
                         "STOP. Tool outputs are mine to emit. Send a single tool call "
                         "(<tool>{...}</tool> or fenced JSON) and STOP. Do NOT write tool_outputs."
@@ -1077,8 +1086,10 @@ class QueryEngine:
                     yield Message("warn", {
                         "text": f"loop: {name} returned the same result {seen}× — steering hard"
                     })
+                    # role=system so this never surfaces in /resume replay,
+                    # and so the model treats it as a runtime directive.
                     self.messages.append({
-                        "role": "user",
+                        "role": "system",
                         "content": (
                             f"STOP. You have called {name} and received the EXACT SAME "
                             f"result {seen} times. You are stuck in a loop and making no "
