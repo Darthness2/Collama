@@ -325,13 +325,25 @@ def repl(agent: Agent, cfg: dict) -> int:
                 continue
             if cmd == "cd":
                 if not arg1:
-                    ui.info(f"workspace: {agent.ctx.root}")
+                    ui.info(f"workspace: {agent.state.workspace}")
                     continue
-                target = Path(os.path.expanduser(os.path.expandvars(arg1))).resolve()
+                # Resolve relative to the CURRENT workspace, not the shell's
+                # cwd — the shell cwd is wherever the user launched collama
+                # from, which usually isn't what they mean by 'cd'.
+                raw = os.path.expanduser(os.path.expandvars(arg1))
+                target = Path(raw)
+                if not target.is_absolute():
+                    target = agent.state.workspace / target
+                target = target.resolve()
                 if not target.is_dir():
-                    ui.error(f"not a directory: {target}")
+                    # Helpful: if a same-named dir exists under home, suggest it.
+                    hint = ""
+                    alt = (agent.state.home / arg1).resolve()
+                    if alt.is_dir() and alt != target:
+                        hint = f"  Did you mean: {alt} ?"
+                    ui.error(f"not a directory: {target}{hint}")
                     continue
-                agent.ctx.root = target
+                agent.state.update(workspace=target)
                 agent.engine.refresh_system_prompt()
                 ui.info(f"workspace → {target}")
                 continue
