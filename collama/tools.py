@@ -152,10 +152,24 @@ def _record_edit(ctx: ToolContext, path: Path, before: str, after: str, op: str)
 def t_write_file(args: dict, ctx: ToolContext) -> str:
     from . import diff as _diff
     path = args["path"]
-    content = args["content"]
+    content = args.get("content")
+    if content is None:
+        return "ERROR: missing argument 'content'"
+    if not isinstance(content, str):
+        return f"ERROR: 'content' must be a string, got {type(content).__name__}"
     p = _resolve(path, ctx.root)
     existed = p.exists()
     old_text = p.read_text(errors="replace") if existed else ""
+    # SAFETY: refuse to silently empty an existing non-empty file. Small
+    # models sometimes call write_file with content="" (forgot to fill it
+    # in, or thought it'd 'reset' the file). Require explicit allow_empty.
+    if existed and old_text.strip() and not content.strip() and not args.get("allow_empty"):
+        return (
+            f"ERROR: refusing to write empty content to existing file {path} "
+            f"({len(old_text)} bytes). If you really meant to empty it, pass "
+            f"allow_empty=true. Otherwise you probably forgot to include the "
+            f"new content."
+        )
     detail = f"{'overwrite' if existed else 'create'} {path} ({len(content)} bytes)"
     if not ctx.confirm("file write", detail):
         return "ERROR: user denied write"
@@ -248,6 +262,13 @@ def t_edit_file(args: dict, ctx: ToolContext) -> str:
         if not ctx.confirm("file edit", f"{path}: replace {count} occurrence(s)"):
             return "ERROR: user denied edit"
         new_text = raw.replace(old, new) if replace_all else raw.replace(old, new, 1)
+        # SAFETY: refuse to silently empty a non-empty file.
+        if raw.strip() and not new_text.strip() and not args.get("allow_empty"):
+            return (
+                f"ERROR: refusing to empty {path}. The replacement would leave "
+                f"the file with no content. If that's intentional, pass "
+                f"allow_empty=true. Otherwise double-check your new_string."
+            )
         p.write_text(new_text, encoding="utf-8")
         _record_edit(ctx, p, raw, new_text, "edit")
         adds, dels = _diff.stats(raw, new_text)
@@ -311,6 +332,13 @@ def t_edit_file(args: dict, ctx: ToolContext) -> str:
         file_lines = text.split("\n")
         new_text = "\n".join(file_lines[:i] + new_n.split("\n") + file_lines[j:])
 
+    # SAFETY: refuse to silently empty a non-empty file (catches both the
+    # exact-match and fuzzy-match branches).
+    if raw.strip() and not new_text.strip() and not args.get("allow_empty"):
+        return (
+            f"ERROR: refusing to empty {path}. The replacement would leave the "
+            f"file with no content. If that's intentional, pass allow_empty=true."
+        )
     p.write_text(new_text, encoding="utf-8")
     _record_edit(ctx, p, raw, new_text, "edit")
     adds, dels = _diff.stats(text, new_text)
@@ -352,6 +380,12 @@ def t_replace_lines(args: dict, ctx: ToolContext) -> str:
     # Splice
     new_lines = lines[:s] + [new_chunk] + lines[e:]
     new_text = "".join(new_lines)
+    # SAFETY: refuse to silently empty a non-empty file.
+    if raw.strip() and not new_text.strip() and not args.get("allow_empty"):
+        return (
+            f"ERROR: refusing to empty {path}. The replacement would leave the "
+            f"file with no content. If that's intentional, pass allow_empty=true."
+        )
     p.write_text(new_text, encoding="utf-8")
     _record_edit(ctx, p, raw, new_text, "replace_lines")
     adds, dels = _diff.stats(raw, new_text)
