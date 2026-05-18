@@ -160,7 +160,7 @@ def t_write_file(args: dict, ctx: ToolContext) -> str:
     if not ctx.confirm("file write", detail):
         return "ERROR: user denied write"
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(content)
+    p.write_text(content, encoding="utf-8")
     _record_edit(ctx, p, old_text, content, "write")
     adds, dels = _diff.stats(old_text, content)
     return f"OK: wrote {path} +{adds} -{dels}"
@@ -248,7 +248,7 @@ def t_edit_file(args: dict, ctx: ToolContext) -> str:
         if not ctx.confirm("file edit", f"{path}: replace {count} occurrence(s)"):
             return "ERROR: user denied edit"
         new_text = raw.replace(old, new) if replace_all else raw.replace(old, new, 1)
-        p.write_text(new_text)
+        p.write_text(new_text, encoding="utf-8")
         _record_edit(ctx, p, raw, new_text, "edit")
         adds, dels = _diff.stats(raw, new_text)
         return f"OK: edited {path} +{adds} -{dels}"
@@ -311,7 +311,7 @@ def t_edit_file(args: dict, ctx: ToolContext) -> str:
         file_lines = text.split("\n")
         new_text = "\n".join(file_lines[:i] + new_n.split("\n") + file_lines[j:])
 
-    p.write_text(new_text)
+    p.write_text(new_text, encoding="utf-8")
     _record_edit(ctx, p, raw, new_text, "edit")
     adds, dels = _diff.stats(text, new_text)
     return f"OK: edited {path} +{adds} -{dels}"
@@ -352,7 +352,7 @@ def t_replace_lines(args: dict, ctx: ToolContext) -> str:
     # Splice
     new_lines = lines[:s] + [new_chunk] + lines[e:]
     new_text = "".join(new_lines)
-    p.write_text(new_text)
+    p.write_text(new_text, encoding="utf-8")
     _record_edit(ctx, p, raw, new_text, "replace_lines")
     adds, dels = _diff.stats(raw, new_text)
     return f"OK: replaced {path}:{s + 1}-{e} +{adds} -{dels}"
@@ -992,7 +992,7 @@ def t_notebook_edit(args: dict, ctx: ToolContext) -> str:
     else:
         return f"ERROR: unknown op '{op}'"
 
-    p.write_text(_json.dumps(nb, indent=1))
+    p.write_text(_json.dumps(nb, indent=1), encoding="utf-8")
     return f"OK: {op} on {path} (now {len(cells)} cells)"
 
 
