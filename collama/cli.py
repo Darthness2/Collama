@@ -132,6 +132,12 @@ def _apply_setting_live(agent: Agent, key: str, value) -> bool:
             return True
         except (TypeError, ValueError):
             return False
+    if key == "ollama.num_predict":
+        try:
+            agent.client.num_predict = int(value)
+            return True
+        except (TypeError, ValueError):
+            return False
     if key == "ollama.stream":
         agent.engine.stream = bool(value); return True
     if key == "ollama.keep_alive":
@@ -176,6 +182,9 @@ def _apply_model_presets(cfg: dict, agent: Agent, model: str) -> list[str]:
     if "num_ctx" in presets:
         agent.client.num_ctx = int(presets["num_ctx"])
         applied.append(f"num_ctx={agent.client.num_ctx}")
+    if "num_predict" in presets:
+        agent.client.num_predict = int(presets["num_predict"])
+        applied.append(f"num_predict={agent.client.num_predict}")
     if "temperature" in presets:
         agent.engine.temperature = float(presets["temperature"])
         applied.append(f"temp={agent.engine.temperature}")
@@ -562,6 +571,8 @@ def repl(agent: Agent, cfg: dict) -> int:
                 ui.info(f"groups:   {', '.join(sorted(groups))}")
                 ui.info(f"stream:   {'on' if agent.engine.stream else 'off'}")
                 ui.info(f"num_ctx:  {agent.client.num_ctx}")
+                np_val = agent.client.num_predict
+                ui.info(f"num_predict: {'unlimited' if np_val in (None, -1) else np_val}")
                 ui.info(f"timeout:  stream {agent.client.read_timeout:.0f}s per-chunk · "
                         f"non-stream {agent.client.nonstream_read_timeout:.0f}s whole-response")
                 status = agent.client.model_vram_status(agent.model)
@@ -656,6 +667,7 @@ def repl(agent: Agent, cfg: dict) -> int:
                 if sub == "save":
                     presets = {
                         "num_ctx": agent.client.num_ctx,
+                        "num_predict": agent.client.num_predict,
                         "temperature": agent.engine.temperature,
                         "stream": agent.engine.stream,
                         "compact_schemas": agent.engine.compact_schemas,
@@ -726,6 +738,8 @@ def repl(agent: Agent, cfg: dict) -> int:
                     "ollama.tool_groups": "tool_groups",
                     # Bare names that should canonicalize under ollama.*
                     "num_ctx":               "ollama.num_ctx",
+                    "num_predict":           "ollama.num_predict",
+                    "max_tokens":            "ollama.num_predict",
                     "stream":                "ollama.stream",
                     "keep_alive":            "ollama.keep_alive",
                     "compact_schemas":       "ollama.compact_schemas",
@@ -821,7 +835,22 @@ def repl(agent: Agent, cfg: dict) -> int:
                 agent.reset()
                 agent.on_turn_complete = lambda a: _autosave(session, a)
                 agent.engine.session_id = session["id"]
-                ui.info(f"new session: {session['id']}")
+                # Reset workspace so the model doesn't write files into the
+                # previous chat's project. Default = home dir; override with
+                # `collama.new_chat_workspace` ("home" | "subdir" | <abs path>).
+                # "subdir" creates ~/collama/<session_id>/ on demand.
+                pref = str(config.get_value(cfg, "collama.new_chat_workspace", "home") or "home")
+                if pref == "subdir":
+                    target = Path.home() / "collama" / session["id"]
+                    target.mkdir(parents=True, exist_ok=True)
+                elif pref == "home":
+                    target = Path.home()
+                else:
+                    target = Path(os.path.expanduser(pref))
+                    if not target.exists():
+                        target = Path.home()
+                agent.state.update(workspace=target)
+                ui.info(f"new session: {session['id']}  ·  workspace → {target}")
                 continue
             if cmd == "resume":
                 listed = _print_sessions(active_id=session.get("id"))
@@ -946,6 +975,7 @@ def main(argv: list[str] | None = None) -> int:
         nonstream_read_timeout=float(config.get_value(cfg, "ollama.nonstream_read_timeout", 1800.0)),
         keep_alive=config.get_value(cfg, "ollama.keep_alive", "30m"),
         num_ctx=config.get_value(cfg, "ollama.num_ctx", 8192),
+        num_predict=config.get_value(cfg, "ollama.num_predict", -1),
     )
 
     model = args.model or os.environ.get("COLLAMA_MODEL") or cfg.get("model")

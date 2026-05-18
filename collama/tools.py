@@ -207,6 +207,41 @@ def _fuzzy_span(text: str, old: str):
     return (hits[0], hits[0] + n) if len(hits) == 1 else None
 
 
+def _indent_insensitive_span(text: str, old: str):
+    """Last-resort matcher: compare lines after stripping ALL leading and
+    trailing whitespace. The model often remembers code at the wrong indent
+    (e.g. it copied a snippet that was inside a block but pastes it
+    top-level). Returns (start, end, indent_delta) or None. indent_delta is
+    how much to re-indent the replacement to match the file's actual
+    indentation at the match site (so we don't dedent the new content).
+    """
+    text_lines = text.split("\n")
+    old_lines = old.split("\n")
+    while len(old_lines) > 1 and old_lines[-1] == "":
+        old_lines = old_lines[:-1]
+    while len(old_lines) > 1 and old_lines[0] == "":
+        old_lines = old_lines[1:]
+    n = len(old_lines)
+    if n == 0:
+        return None
+    strip_old = [ln.strip() for ln in old_lines]
+    hits = [
+        i for i in range(len(text_lines) - n + 1)
+        if [ln.strip() for ln in text_lines[i:i + n]] == strip_old
+    ]
+    if len(hits) != 1:
+        return None
+    i = hits[0]
+
+    def leading(s: str) -> str:
+        return s[:len(s) - len(s.lstrip())]
+    # Use the first non-blank line on each side to gauge the indent delta.
+    first_old_idx = next((k for k, ln in enumerate(old_lines) if ln.strip()), 0)
+    file_indent = leading(text_lines[i + first_old_idx])
+    old_indent = leading(old_lines[first_old_idx])
+    return (i, i + n, file_indent, old_indent)
+
+
 def _closest_region(text: str, old: str) -> str:
     """Show the file region most similar to `old`'s first non-blank line so
     the model can self-correct after a failed match."""
@@ -287,6 +322,36 @@ def t_edit_file(args: dict, ctx: ToolContext) -> str:
     else:
         span = _fuzzy_span(text, old_n)
         if span is None:
+            # Last-resort recovery: indent-insensitive line match. Re-indents
+            # the replacement to match the file's actual indentation so we
+            # don't break Python / YAML scoping.
+            ii = _indent_insensitive_span(text, old_n)
+            if ii is not None:
+                i, j, file_indent, old_indent = ii
+                if not ctx.confirm("file edit", f"{path}: replace lines {i + 1}-{j} (indent-tolerant match)"):
+                    return "ERROR: user denied edit"
+                file_lines = text.split("\n")
+                new_split = new_n.split("\n")
+                # Re-base every replacement line: strip the old common indent,
+                # add the file's indent. Blank lines stay blank.
+                rebased = []
+                for ln in new_split:
+                    if not ln.strip():
+                        rebased.append("")
+                        continue
+                    if old_indent and ln.startswith(old_indent):
+                        ln = ln[len(old_indent):]
+                    rebased.append(file_indent + ln)
+                new_text = "\n".join(file_lines[:i] + rebased + file_lines[j:])
+                if raw.strip() and not new_text.strip() and not args.get("allow_empty"):
+                    return (
+                        f"ERROR: refusing to empty {path}. The replacement would leave the "
+                        f"file with no content. If that's intentional, pass allow_empty=true."
+                    )
+                p.write_text(new_text, encoding="utf-8")
+                _record_edit(ctx, p, raw, new_text, "edit")
+                adds, dels = _diff.stats(text, new_text)
+                return f"OK: edited {path} +{adds} -{dels} (indent-recovered)"
             lines = len(text.splitlines())
             # Count consecutive failures on this path this turn — after the
             # second one, escalate hard: keep retrying edit_file won't work,

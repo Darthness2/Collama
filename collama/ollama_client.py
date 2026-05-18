@@ -95,6 +95,7 @@ class OllamaClient:
         nonstream_read_timeout: float = 1800.0,
         keep_alive: str | int | None = "30m",
         num_ctx: int | None = 8192,
+        num_predict: int | None = -1,
     ):
         """Timeouts split by transport because they mean different things:
 
@@ -125,13 +126,20 @@ class OllamaClient:
         )
         self.keep_alive = keep_alive
         self.num_ctx = num_ctx
+        self.num_predict = num_predict
 
     def _apply_keep_alive(self, payload: dict) -> None:
         if self.keep_alive is not None and "keep_alive" not in payload:
             payload["keep_alive"] = self.keep_alive
+        opts = payload.setdefault("options", {}) if (self.num_ctx or self.num_predict is not None) else None
         if self.num_ctx:
-            opts = payload.setdefault("options", {})
             opts.setdefault("num_ctx", self.num_ctx)
+        # Many models in the Ollama library ship with a baked-in num_predict
+        # cap (often 128/256), which truncates the assistant mid-sentence.
+        # -1 = generate until natural stop / num_ctx. Explicit so the model
+        # default never silently clips the response.
+        if self.num_predict is not None and opts is not None:
+            opts.setdefault("num_predict", self.num_predict)
 
     def list_models(self) -> list[str]:
         try:
