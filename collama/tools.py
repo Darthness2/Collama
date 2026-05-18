@@ -12,7 +12,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from . import diff as _diff
 from . import ui
+from .coordinator import tick as _coordinator_tick
 
 MAX_OUTPUT_CHARS = 16000
 
@@ -150,7 +152,6 @@ def _record_edit(ctx: ToolContext, path: Path, before: str, after: str, op: str)
 
 
 def t_write_file(args: dict, ctx: ToolContext) -> str:
-    from . import diff as _diff
     path = args["path"]
     content = args.get("content")
     if content is None:
@@ -246,7 +247,6 @@ def _read_text_robust(p: Path) -> str:
 
 
 def t_edit_file(args: dict, ctx: ToolContext) -> str:
-    from . import diff as _diff
     path = args["path"]
     old = args["old_string"]
     new = args["new_string"]
@@ -352,7 +352,6 @@ def t_replace_lines(args: dict, ctx: ToolContext) -> str:
     drift. Reads the file, replaces lines [start_line, end_line] (1-indexed,
     inclusive) with `new_content`, writes it back. Records to /undo history.
     """
-    from . import diff as _diff
     path = args["path"]
     start = args.get("start_line")
     end = args.get("end_line")
@@ -792,8 +791,7 @@ def t_coordinator_tick(args: dict, ctx: ToolContext) -> str:
     engine = getattr(ctx, "engine", None)
     if engine is None:
         return "ERROR: engine not available"
-    from .coordinator import tick
-    results = tick(
+    results = _coordinator_tick(
         engine,
         team=args.get("team"),
         auto_claim=bool(args.get("auto_claim", False)),
@@ -816,13 +814,12 @@ def t_coordinator_run(args: dict, ctx: ToolContext) -> str:
     engine = getattr(ctx, "engine", None)
     if engine is None:
         return "ERROR: engine not available"
-    from .coordinator import tick
     max_rounds = int(args.get("max_rounds", 5))
     auto_claim = bool(args.get("auto_claim", True))
     team = args.get("team")
     rounds: list[str] = []
     for r in range(1, max_rounds + 1):
-        results = tick(engine, team=team, auto_claim=auto_claim)
+        results = _coordinator_tick(engine, team=team, auto_claim=auto_claim)
         if not results:
             break
         rounds.append(f"round {r}: processed {len(results)} teammate(s)")
@@ -1174,26 +1171,6 @@ def t_sleep(args: dict, ctx: ToolContext) -> str:
     return f"OK: slept {secs}s"
 
 
-def t_schedule_cron(args: dict, ctx: ToolContext) -> str:
-    """ScheduleCronTool — register a recurring prompt (in-memory only this session)."""
-    state = getattr(ctx, "state", None)
-    if state is None:
-        return "ERROR: state not available"
-    import time as _time
-    sched = list(state.schedules or [])
-    sid = f"s{len(sched):04d}"
-    entry = {
-        "id": sid,
-        "every_seconds": int(args.get("every_seconds", 0)),
-        "expr": args.get("expr", ""),
-        "prompt": args["prompt"],
-        "last_run": 0.0,
-        "registered_at": _time.time(),
-    }
-    sched.append(entry)
-    state.update(schedules=sched)
-    return f"OK: scheduled {sid} (run every {entry['every_seconds']}s, when due will inject the prompt on the next turn)"
-
 
 # -------------------------------------------------------------- task control
 
@@ -1276,7 +1253,7 @@ def t_skill(args: dict, ctx: ToolContext) -> str:
     return f"ERROR: unknown op '{op}'"
 
 
-# -------------------------------------------------------------- mcp / lsp / tungsten (stubs)
+# -------------------------------------------------------------- mcp / lsp (stubs)
 
 def t_mcp(args: dict, ctx: ToolContext) -> str:
     return ("ERROR: MCP server not configured. To enable, install an MCP "
@@ -1295,10 +1272,6 @@ def t_mcp_read_resource(args: dict, ctx: ToolContext) -> str:
 def t_lsp(args: dict, ctx: ToolContext) -> str:
     return ("ERROR: LSP not configured. Configure a language server (e.g. "
             "pyright, gopls) under lsp.servers in config.json. Stub.")
-
-
-def t_tungsten(args: dict, ctx: ToolContext) -> str:
-    return "ERROR: TungstenTool is a placeholder; not implemented in Collama."
 
 
 # Error-location patterns, most-specific first. Used to point the model
@@ -1422,7 +1395,6 @@ TOOLS: dict[str, ToolFn] = {
     "config_get": t_config_get,
     "config_set": t_config_set,
     "sleep": t_sleep,
-    "schedule_cron": t_schedule_cron,
     "task_stop": t_task_stop,
     "task_output": t_task_output,
     "skill": t_skill,
@@ -1430,7 +1402,6 @@ TOOLS: dict[str, ToolFn] = {
     "mcp_list_resources": t_mcp_list_resources,
     "mcp_read_resource": t_mcp_read_resource,
     "lsp": t_lsp,
-    "tungsten": t_tungsten,
 }
 
 
@@ -1848,16 +1819,6 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "description": "Pause execution for `seconds` (capped at 60).",
         "parameters": {"type": "object", "properties": {"seconds": {"type": "number"}}},
     }},
-    {"type": "function", "function": {
-        "name": "schedule_cron",
-        "description": "Register a recurring prompt; on each turn the engine checks if any schedule is due and re-runs the prompt. (In-memory for now.)",
-        "parameters": {"type": "object", "properties": {
-            "prompt": {"type": "string"},
-            "every_seconds": {"type": "integer"},
-            "expr": {"type": "string"},
-        }, "required": ["prompt"]},
-    }},
-
     # ---------- task control ----------
     {"type": "function", "function": {
         "name": "task_stop",
@@ -1880,7 +1841,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         }},
     }},
 
-    # ---------- MCP / LSP / tungsten (stubs) ----------
+    # ---------- MCP / LSP (stubs) ----------
     {"type": "function", "function": {
         "name": "mcp",
         "description": "Generic MCP tool call. Stubbed — returns ERROR until an MCP server is configured.",
@@ -1907,11 +1868,6 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "method": {"type": "string"}, "params": {"type": "object"},
         }},
     }},
-    {"type": "function", "function": {
-        "name": "tungsten",
-        "description": "Reserved placeholder — not implemented.",
-        "parameters": {"type": "object", "properties": {}},
-    }},
 ]
 
 
@@ -1937,7 +1893,7 @@ TOOL_GROUPS: dict[str, list[str]] = {
     "notebook": ["notebook_edit"],
     "worktree": ["enter_worktree", "exit_worktree"],
     "interaction": ["ask_user_question"],
-    "system": ["config_get", "config_set", "sleep", "schedule_cron", "skill", "powershell"],
+    "system": ["config_get", "config_set", "sleep", "skill", "powershell"],
     # heavy / specialized — OFF by default
     "subagent": ["agent_call", "agent_call_async"],
     "github": [
@@ -1950,7 +1906,7 @@ TOOL_GROUPS: dict[str, list[str]] = {
         "teammate_delete", "teammate_list", "send_message", "inbox",
         "coordinator_tick", "coordinator_run",
     ],
-    "stubs": ["mcp", "mcp_list_resources", "mcp_read_resource", "lsp", "tungsten"],
+    "stubs": ["mcp", "mcp_list_resources", "mcp_read_resource", "lsp"],
 }
 
 DEFAULT_GROUPS: set[str] = {
@@ -1958,14 +1914,6 @@ DEFAULT_GROUPS: set[str] = {
     "notebook", "worktree", "interaction", "system",
 }
 # off by default: subagent, github, teams, stubs
-
-
-def _tool_to_group() -> dict[str, str]:
-    out: dict[str, str] = {}
-    for grp, names in TOOL_GROUPS.items():
-        for n in names:
-            out[n] = grp
-    return out
 
 
 def _compact_schema(schema: dict) -> dict:

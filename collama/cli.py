@@ -7,8 +7,10 @@ import sys
 from pathlib import Path
 
 from . import __version__, config, sessions, ui
+from . import diff as _diff
 from .agent import Agent
-from .ollama_client import OllamaClient, OllamaError
+from .coordinator import tick as _coordinator_tick
+from .ollama_client import OllamaClient, OllamaError, _is_apple_silicon
 from .prompt import Prompt
 
 
@@ -287,7 +289,6 @@ def repl(agent: Agent, cfg: dict) -> int:
             return
         st = a.client.model_vram_status(a.model)
         if st and not st["fully_gpu"]:
-            from .ollama_client import _is_apple_silicon
             size_gb = st["size"] / (1024**3)
             cpu_gb = st["cpu_bytes"] / (1024**3)
             pct = st["cpu_percent"]
@@ -473,8 +474,7 @@ def repl(agent: Agent, cfg: dict) -> int:
                             print(f"    - {m.short()}")
                 continue
             if cmd == "tick":
-                from .coordinator import tick as _tick
-                results = _tick(
+                results = _coordinator_tick(
                     agent.engine,
                     team=arg1 or None,
                     auto_claim=(arg2.lower() == "claim") if arg2 else False,
@@ -545,7 +545,18 @@ def repl(agent: Agent, cfg: dict) -> int:
                 from .tools import DEFAULT_GROUPS
                 groups = agent.state.tool_groups if agent.state.tool_groups is not None else DEFAULT_GROUPS
                 ui.info(f"model:    {agent.model}")
-                ui.info(f"workspace: {agent.ctx.root}")
+                ws_line = f"workspace: {agent.ctx.root}"
+                try:
+                    import subprocess as _sp
+                    r = _sp.run(
+                        ["git", "-C", str(agent.ctx.root), "rev-parse", "--abbrev-ref", "HEAD"],
+                        capture_output=True, text=True, timeout=2,
+                    )
+                    if r.returncode == 0 and r.stdout.strip():
+                        ws_line += f"  (git: {r.stdout.strip()})"
+                except Exception:
+                    pass
+                ui.info(ws_line)
                 ui.info(f"home:     {Path.home()}")
                 ui.info(f"tools:    {'native' if agent.tools_enabled else 'text-protocol fallback'}")
                 ui.info(f"groups:   {', '.join(sorted(groups))}")
@@ -554,7 +565,6 @@ def repl(agent: Agent, cfg: dict) -> int:
                 ui.info(f"timeout:  stream {agent.client.read_timeout:.0f}s per-chunk · "
                         f"non-stream {agent.client.nonstream_read_timeout:.0f}s whole-response")
                 status = agent.client.model_vram_status(agent.model)
-                from .ollama_client import _is_apple_silicon
                 mac = _is_apple_silicon()
                 label = "memory" if mac else "vram"
                 if status is None:
@@ -769,7 +779,6 @@ def repl(agent: Agent, cfg: dict) -> int:
                 if not hist:
                     ui.info("(no edits this session)")
                     continue
-                from . import diff as _diff
                 limit = int(arg1) if arg1.isdigit() else len(hist)
                 for entry in hist[-limit:]:
                     path = entry.get("path", "?")
