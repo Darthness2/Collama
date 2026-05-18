@@ -872,6 +872,12 @@ class QueryEngine:
             # non-streaming path, which has no deltas.
             if narration and not self.stream:
                 yield Message("narration", {"text": narration})
+            elif narration and self.stream:
+                # Streaming mode: emit assistant so the renderer can fall
+                # back to the static panel when the stream was invisible
+                # (model wrapped everything in <plan>/<think>). The
+                # renderer no-ops this if visible deltas already streamed.
+                yield Message("assistant", {"text": narration})
 
             yield from self._execute_and_record(calls)
 

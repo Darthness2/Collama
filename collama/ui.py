@@ -240,8 +240,15 @@ class StreamMarkdown:
         self.dim_opened = False    # have we emitted any dim line in current block?
         self.suppress_until: str | None = None  # close marker if currently eliding
         self._max_open = max(len(o) for o, _, _ in self.SUPPRESS_PAIRS)
+        # True iff we've emitted at least one non-dim, non-empty line.
+        # The renderer falls back to the static assistant panel when this
+        # stays False — covers the case where the model wraps its entire
+        # response in <plan>/<think> tags and the stream looks empty.
+        self.visible_emitted = False
 
     def _emit_line(self, line: str, terminator: str) -> None:
+        if not self.in_dim and line.strip():
+            self.visible_emitted = True
         if self.in_dim:
             # Dim block — italic gray, '◦' prefix for the first line of the
             # block, indented continuation after.
@@ -252,7 +259,9 @@ class StreamMarkdown:
                 self.dim_opened = True
             else:
                 prefix = self.dim_cont_prefix
-            styled = color(line, SOFT + ITALIC) if line else ""
+            # MUTED (246) is more legible than SOFT (240) on dark terminals;
+            # the model's reasoning is worth reading, not squinting at.
+            styled = color(line, MUTED + ITALIC) if line else ""
             self.emit(prefix + styled + terminator)
         else:
             if self.mid_line:

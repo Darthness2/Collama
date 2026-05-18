@@ -141,6 +141,7 @@ class _RenderState:
     final_text: str = ""
     streaming: bool = False        # currently mid-stream (deltas arriving)
     streamed_any: bool = False     # streamed at least one delta this assistant msg
+    streamed_visible: bool = False # stream emitted non-dim, non-empty content
     md: object | None = None       # ui.StreamMarkdown when streaming
     # Pending tool_call event waiting for its tool_result. We defer drawing
     # '▸ name  summary' until the result arrives so CACHED read_file events
@@ -152,6 +153,7 @@ def _end_stream_line(rs: _RenderState) -> None:
     if rs.streaming:
         if rs.md is not None:
             rs.md.flush()  # type: ignore[attr-defined]
+            rs.streamed_visible = bool(getattr(rs.md, "visible_emitted", False))
         sys.stdout.write("\n")
         sys.stdout.flush()
         rs.streaming = False
@@ -196,13 +198,18 @@ def render_event(event: Message, rs: _RenderState) -> None:
         rs.streamed_any = True
     elif k == "assistant":
         rs.final_text = d["text"]
-        # If we already streamed this answer token-by-token, don't re-print
-        # the whole panel — just finish the line. Otherwise (non-stream
-        # fallback) render the nice markdown panel.
-        if rs.streamed_any:
+        # Skip the panel only when the stream actually showed visible text.
+        # If the model wrapped its entire response in <plan>/<think> tags,
+        # the live stream emitted nothing the user could read — fall back
+        # to the static panel so the answer isn't invisible.
+        if rs.streamed_any and rs.streamed_visible:
             rs.streamed_any = False
+            rs.streamed_visible = False
         else:
-            ui.assistant(d["text"])
+            rs.streamed_any = False
+            rs.streamed_visible = False
+            if d["text"].strip():
+                ui.assistant(d["text"])
     elif k == "tool_call":
         # Defer the ▸ line — we may want to suppress it entirely if the
         # result is a cache nudge (pure internal recovery).
