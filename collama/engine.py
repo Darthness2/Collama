@@ -740,13 +740,21 @@ class QueryEngine:
                         ],
                     )
                     spinner.start()
+                    # Heartbeat for AFTER the first token has arrived. The
+                    # spinner above covers prompt-eval; this covers Qwen-style
+                    # silent <think> phases between visible tokens that would
+                    # otherwise look like a freeze.
+                    watchdog = ui.SilenceWatchdog()
                     got_first = False
                     try:
                         for kind, payload in msg.iter():
                             if kind == "delta":
                                 if not got_first:
                                     spinner.stop()
+                                    watchdog.start()
                                     got_first = True
+                                else:
+                                    watchdog.ping()
                                 yield Message("delta", {"text": payload})
                             elif kind == "done":
                                 final_msg = payload
@@ -755,6 +763,7 @@ class QueryEngine:
                         # proxies that mangle chunked transfers). Fall back to
                         # a single non-streaming request for this turn.
                         spinner.stop()
+                        watchdog.stop()
                         yield Message("warn", {
                             "text": f"streaming connection broke ({e}); retrying without streaming."
                         })
@@ -766,6 +775,7 @@ class QueryEngine:
                         final_msg = "RETRIED"  # sentinel: msg is already the message dict
                     finally:
                         spinner.stop()
+                        watchdog.stop()
                     if final_msg is None:
                         # chat_stream_assembled always synthesizes a 'done'
                         # now, so this only happens if the iterator was

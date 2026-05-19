@@ -646,6 +646,85 @@ class Spinner:
         self.stop()
 
 
+class SilenceWatchdog:
+    """Background watchdog that prints a dim 'still receiving' breadcrumb
+    when a streaming response has gone quiet for a while.
+
+    Why this exists: Qwen-class reasoning models can stop emitting tokens
+    for a long time while they think (<think> happens model-side, BEFORE
+    any tokens are sent). Without feedback the user can't tell the
+    difference between 'thinking hard' and 'Ollama died' and reaches for
+    Ctrl+C — usually right before the answer would have started.
+
+    Design notes:
+    - Writes to stderr, not stdout, so the streaming text buffer is never
+      overwritten mid-line. Output may visually land below an unfinished
+      line; that's intentional — accuracy over prettiness.
+    - Escalation tiers are spaced wide (25s, 60s, 180s, 600s) so we never
+      spam the scrollback. Each tier prints once per silence stretch.
+    - .ping() resets the silence counter AND the escalation index, so a
+      single token between two long stalls produces two breadcrumb runs
+      rather than skipping past tiers.
+    """
+
+    DEFAULT_TIERS = (25.0, 60.0, 180.0, 600.0)
+
+    def __init__(
+        self,
+        label: str = "still receiving",
+        tiers: tuple[float, ...] = DEFAULT_TIERS,
+    ) -> None:
+        self.label = label
+        self.tiers = tiers
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._last = 0.0
+        self._lock = threading.Lock()
+        self._tier_idx = 0
+
+    def start(self) -> None:
+        if not sys.stderr.isatty() or self._thread is not None:
+            return
+        self._last = time.monotonic()
+        self._tier_idx = 0
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def ping(self) -> None:
+        # Called on every received token.
+        with self._lock:
+            self._last = time.monotonic()
+            self._tier_idx = 0
+
+    def stop(self) -> None:
+        if self._thread is None:
+            return
+        self._stop.set()
+        self._thread.join(timeout=1.0)
+        self._thread = None
+
+    def _run(self) -> None:
+        while not self._stop.wait(1.0):
+            with self._lock:
+                silent = time.monotonic() - self._last
+                idx = self._tier_idx
+            if idx >= len(self.tiers):
+                continue
+            if silent < self.tiers[idx]:
+                continue
+            # Dim italic line on stderr, prefixed with \n so it lands on a
+            # fresh row even if stdout was mid-line.
+            sys.stderr.write(
+                "\n"
+                + color(f"  ◦ {self.label} — {silent:0.0f}s since last token…", MUTED + ITALIC)
+                + "\n"
+            )
+            sys.stderr.flush()
+            with self._lock:
+                self._tier_idx += 1
+
+
 # ---------- log helpers ----------
 
 def info(msg: str) -> None:
