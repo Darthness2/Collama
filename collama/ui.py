@@ -619,20 +619,51 @@ class Spinner:
         # are sub-100ms), we never draw a frame and there's no visual flash.
         if self._stop.wait(0.15):
             return
+        import shutil
         i = 0
+        last_label_idx = -1
         while not self._stop.is_set():
             frame = _SPIN_FRAMES[i % len(_SPIN_FRAMES)]
             elapsed = time.monotonic() - self._t0
+            # When the label escalates, print the new tier as a static info
+            # line *above* the spinner instead of inlining it. Keeps the
+            # animated line short enough to never wrap on 80-col terminals,
+            # which used to scroll a fresh row into scrollback every frame.
+            label_idx = 0
+            for j, (after, _) in enumerate(self.escalations, start=1):
+                if elapsed >= after:
+                    label_idx = j
+                else:
+                    break
+            if label_idx != last_label_idx and label_idx > 0:
+                # New tier crossed — print the explanation once, then keep
+                # the spinner short.
+                _, tier_label = self.escalations[label_idx - 1]
+                sys.stdout.write("\r\033[2K" + color("  · " + tier_label, MUTED) + "\n")
+                sys.stdout.flush()
+                last_label_idx = label_idx
+            short_label = self.label  # always the BASE label, not escalated
             timer = f"({elapsed:0.1f}s)"
-            line = (
-                "  "
-                + color(frame, self.color_c)
-                + " "
-                + color(self._current_label(elapsed) + "…", MUTED)
-                + "  "
-                + color(timer, SOFT)
-            )
-            sys.stdout.write("\r\033[2K" + line)
+            raw_visible = f"  {frame} {short_label}…  {timer}"
+            # Hard-truncate to terminal width so the line can't wrap. We size
+            # off visible chars (no ANSI) since color codes add bytes but
+            # zero columns.
+            cols = shutil.get_terminal_size((80, 24)).columns
+            if len(raw_visible) > cols - 1:
+                raw_visible = raw_visible[: max(1, cols - 2)] + "…"
+                # Rebuild a styled version that matches the truncated text.
+                # Approximation: color the whole truncated string as MUTED.
+                styled = color(raw_visible, MUTED)
+            else:
+                styled = (
+                    "  "
+                    + color(frame, self.color_c)
+                    + " "
+                    + color(short_label + "…", MUTED)
+                    + "  "
+                    + color(timer, SOFT)
+                )
+            sys.stdout.write("\r\033[2K" + styled)
             sys.stdout.flush()
             i += 1
             # Wait in small increments so .stop() reacts quickly.
