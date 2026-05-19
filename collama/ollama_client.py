@@ -91,7 +91,7 @@ class OllamaClient:
         host: str = "http://localhost:11434",
         timeout: int = 600,
         connect_timeout: float = 15.0,
-        read_timeout: float = 600.0,
+        read_timeout: float = 1800.0,
         nonstream_read_timeout: float = 1800.0,
         keep_alive: str | int | None = "30m",
         num_ctx: int | None = 8192,
@@ -119,7 +119,7 @@ class OllamaClient:
         self.connect_timeout = connect_timeout
         legacy_override = timeout != 600
         self.read_timeout = (
-            float(timeout) if legacy_override and read_timeout == 600.0 else read_timeout
+            float(timeout) if legacy_override and read_timeout == 1800.0 else read_timeout
         )
         self.nonstream_read_timeout = (
             float(timeout) if legacy_override and nonstream_read_timeout == 1800.0 else nonstream_read_timeout
