@@ -17,6 +17,7 @@ from .state import AppState
 # Tools that don't mutate anything we care about — always allowed.
 READ_ONLY: set[str] = {
     "read_file", "list_dir", "grep", "glob", "tool_search",
+    "check_syntax",
     "web_fetch", "web_search",
     "task_get", "task_list", "task_output", "task_status",
     "inbox", "team_list", "teammate_list",
