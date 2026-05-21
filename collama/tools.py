@@ -410,6 +410,101 @@ def t_edit_file(args: dict, ctx: ToolContext) -> str:
     return f"OK: edited {path} +{adds} -{dels}"
 
 
+def _resolve_edit(
+    text: str, old: str, new: str, replace_all: bool
+) -> tuple[str | None, str]:
+    """Apply ONE old->new substitution to `text`, trying progressively
+    looser matches. Returns (new_text, note) on success or (None, reason)
+    on failure. Pure — does no IO, so multi_edit can chain it in memory and
+    only touch disk once the whole batch resolves."""
+    count = text.count(old)
+    if count == 1 or (count > 1 and replace_all):
+        out = text.replace(old, new) if replace_all else text.replace(old, new, 1)
+        return out, "exact"
+    if count > 1:
+        return None, f"matches {count}× — set replace_all or add surrounding context"
+
+    t, o, n = _norm_eol(text), _norm_eol(old), _norm_eol(new)
+    c = t.count(o)
+    if c == 1 or (c > 1 and replace_all):
+        out = t.replace(o, n) if replace_all else t.replace(o, n, 1)
+        return out, "eol-normalized"
+    if c > 1:
+        return None, f"matches {c}× — set replace_all or add surrounding context"
+
+    span = _fuzzy_span(t, o)
+    if span is not None:
+        i, j = span
+        lines = t.split("\n")
+        return "\n".join(lines[:i] + n.split("\n") + lines[j:]), "whitespace-tolerant"
+
+    ii = _indent_insensitive_span(t, o)
+    if ii is not None:
+        i, j, file_indent, old_indent = ii
+        lines = t.split("\n")
+        rebased = []
+        for ln in n.split("\n"):
+            if not ln.strip():
+                rebased.append("")
+                continue
+            if old_indent and ln.startswith(old_indent):
+                ln = ln[len(old_indent):]
+            rebased.append(file_indent + ln)
+        return "\n".join(lines[:i] + rebased + lines[j:]), "indent-recovered"
+
+    return None, "old_string not found"
+
+
+def t_multi_edit(args: dict, ctx: ToolContext) -> str:
+    """Apply MANY edits to a single file in one call. Edits apply in order,
+    each against the result of the previous one. The batch is atomic: if any
+    edit fails to match, NOTHING is written and the failing edit is named."""
+    path = args["path"]
+    edits = args.get("edits") or []
+    if not isinstance(edits, list) or not edits:
+        return "ERROR: 'edits' must be a non-empty list of {old_string, new_string} objects."
+    p = _resolve(path, ctx.root)
+    if not p.exists():
+        return f"ERROR: file not found: {path}"
+    raw = _read_text_robust(p)
+
+    text = raw
+    notes: list[str] = []
+    for idx, e in enumerate(edits, start=1):
+        if not isinstance(e, dict):
+            return f"ERROR: edit #{idx} is not an object. Nothing written."
+        old = e.get("old_string")
+        new = e.get("new_string")
+        if old is None or new is None:
+            return (f"ERROR: edit #{idx} is missing old_string or new_string. "
+                    f"Nothing written.")
+        new_text, note = _resolve_edit(text, old, new, bool(e.get("replace_all", False)))
+        if new_text is None:
+            return (
+                f"ERROR: edit #{idx} of {len(edits)} failed: {note}.\n"
+                f"The batch is ATOMIC — nothing was written. Fix edit #{idx} "
+                f"(copy old_string exactly from a recent read_file) and resend the "
+                f"whole batch, or drop that edit and apply it separately with "
+                f"replace_lines."
+            )
+        text = new_text
+        notes.append(f"#{idx}:{note}")
+
+    if text == raw:
+        return f"OK: no-op — all {len(edits)} edits left {path} unchanged."
+    if raw.strip() and not text.strip() and not args.get("allow_empty"):
+        return (f"ERROR: refusing to empty {path}. If intentional, pass "
+                f"allow_empty=true.")
+    if not ctx.confirm("file edit", f"{path}: apply {len(edits)} edits in one batch"):
+        return "ERROR: user denied edit"
+    p.write_text(text, encoding="utf-8")
+    _record_edit(ctx, p, raw, text, "edit")
+    adds, dels = _diff.stats(raw, text)
+    recovered = sum(1 for n in notes if not n.endswith(":exact"))
+    tail = f"  ({recovered} fuzzy-matched)" if recovered else ""
+    return f"OK: applied {len(edits)} edits to {path} +{adds} -{dels}{tail}"
+
+
 def t_replace_lines(args: dict, ctx: ToolContext) -> str:
     """Surgical line-range replacement — bypasses string matching entirely.
 
@@ -1668,6 +1763,7 @@ TOOLS: dict[str, ToolFn] = {
     "read_file": t_read_file,
     "write_file": t_write_file,
     "edit_file": t_edit_file,
+    "multi_edit": t_multi_edit,
     "replace_lines": t_replace_lines,
     "list_dir": t_list_dir,
     "grep": t_grep,
@@ -1765,7 +1861,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "edit_file",
-            "description": "Replace an exact string in a file. By default old_string must be unique; set replace_all to replace every occurrence.",
+            "description": "Replace an exact string in a file. By default old_string must be unique; set replace_all to replace every occurrence. For 2+ edits to the SAME file, use multi_edit instead — one call, not many.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1775,6 +1871,42 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "replace_all": {"type": "boolean"},
                 },
                 "required": ["path", "old_string", "new_string"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "multi_edit",
+            "description": (
+                "Apply MANY edits to ONE file in a single call. Strongly "
+                "preferred over repeated edit_file calls when a task touches "
+                "several spots in the same file (renames, palette swaps, "
+                "multi-site refactors). Edits apply in order, each against the "
+                "result of the previous one. Atomic: if any edit fails to "
+                "match, nothing is written and the failing edit is named so "
+                "you can fix just that one. Collect ALL the changes you intend "
+                "for a file and send them together."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File to edit."},
+                    "edits": {
+                        "type": "array",
+                        "description": "Ordered list of edits to apply.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old_string": {"type": "string"},
+                                "new_string": {"type": "string"},
+                                "replace_all": {"type": "boolean"},
+                            },
+                            "required": ["old_string", "new_string"],
+                        },
+                    },
+                },
+                "required": ["path", "edits"],
             },
         },
     },
@@ -2230,8 +2362,8 @@ def _all_tools() -> dict[str, ToolFn]:
 # cost on a local model. Groups let the heavy/rarely-used ones be opt-in.
 TOOL_GROUPS: dict[str, list[str]] = {
     "core": [
-        "read_file", "write_file", "edit_file", "replace_lines",
-        "list_dir", "grep", "run_bash", "set_workspace",
+        "read_file", "write_file", "edit_file", "multi_edit", "replace_lines",
+        "list_dir", "grep", "run_bash", "set_workspace", "check_syntax",
     ],
     "search": ["glob", "tool_search", "web_fetch", "web_search"],
     "tasks": [

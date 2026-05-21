@@ -287,7 +287,10 @@ Operating principles:
   user can see live which step you're on. Emit ONE marker per step.
 - Be concise. Don't ask for file contents — read them. Don't guess code
   — verify.
-- One step at a time: call a tool, observe, decide.
+- One step at a time for INVESTIGATION (read, grep, observe, decide).
+  But when you EDIT, batch it: collect every change you intend for a
+  file and apply them together in one multi_edit call. Do not
+  read-edit-read-edit one line at a time — that is slow and loops.
 - Wrap private reasoning in <think>...</think>.
 - DO NOT re-read a file you've already read this turn. The previous read
   is still in your context — scroll back and use it. Reading the same
@@ -305,17 +308,30 @@ How to use the tools:
 - read_file: read in ranges if a file is huge. Default returns 1..end
   but for files > ~300 lines pass start_line/end_line so you don't drown
   in tokens.
-- edit_file rules:
+- BATCH YOUR EDITS. When a task changes several places in one file
+  (renames, color/constant swaps, multi-site refactors), do NOT make
+  one edit_file call per spot. Read the file ONCE, work out EVERY
+  change, then send them all in a SINGLE multi_edit call:
+      multi_edit(path, edits=[
+        {old_string: "...", new_string: "..."},
+        {old_string: "...", new_string: "..."},
+        ... every change for this file ...
+      ])
+  multi_edit is atomic — if one edit doesn't match, nothing is written
+  and the harness names the failing edit so you fix just that one.
+  Prefer one multi_edit of 8 changes over 8 edit_file calls. Use plain
+  edit_file only for a genuine single-spot change.
+- edit_file / multi_edit rules:
     * old_string must match the file EXACTLY, including indentation.
       Copy text DIRECTLY from a recent read_file output — do not retype
       from memory or paraphrase.
     * If old_string isn't found, the harness shows the closest matching
       region. Use THAT exact text as your new old_string.
-    * If edit_file fails twice on the same file, STOP using it. Call
-      replace_lines(path, start_line, end_line, new_content) instead —
-      it's a surgical line-range edit that doesn't depend on string
-      matching, so it sidesteps every encoding/quote/indent issue.
-      Use grep to find the line numbers first, then call replace_lines.
+    * If edits keep failing to match on the same file, STOP retrying.
+      Call replace_lines(path, start_line, end_line, new_content) — a
+      surgical line-range edit that doesn't depend on string matching,
+      so it sidesteps every encoding/quote/indent issue. Use grep to
+      find the line numbers first, then call replace_lines.
     * Do NOT escape into run_bash to do edits with a Python script. The
       harness can't track those edits for /undo, and small models tend
       to write read-only `f.read()` scripts that look like progress but
@@ -1104,6 +1120,16 @@ class QueryEngine:
                 # Result-based loop detection: same (tool, result) coming back
                 # repeatedly means the model is stuck — args-based detection
                 # misses this because the model varies args slightly.
+                #
+                # BUT: a SUCCESSFUL edit/write is progress by definition, even
+                # though its result string ("OK: edited f.py +1 -1") collides
+                # with the previous successful edit's string. Counting those as
+                # a loop falsely aborts a turn that's making many small, real
+                # changes. Only loop-check mutations when they FAILED.
+                _mutating = name in ("edit_file", "write_file", "replace_lines",
+                                     "multi_edit", "notebook_edit")
+                if _mutating and d.get("ok"):
+                    continue
                 seen = self._result_loop_count(name, result)
                 if seen == LOOP_THRESHOLD:
                     yield Message("warn", {

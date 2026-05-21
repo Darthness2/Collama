@@ -110,6 +110,8 @@ def terminal_resolver(name: str, args: dict, state: AppState) -> str:
         detail = f": write {args.get('path', '')}"
     elif name == "edit_file":
         detail = f": edit {args.get('path', '')}"
+    elif name == "multi_edit":
+        detail = f": edit {args.get('path', '')} ({len(args.get('edits') or [])} edits)"
     elif name.startswith("gh_") or name == "github_api":
         detail = f": {name} {args}"
     ui.warn(f"\nApprove {name}{detail}?")

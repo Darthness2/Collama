@@ -230,9 +230,22 @@ def render_event(event: Message, rs: _RenderState) -> None:
             ui.tool_call(pname, psummary)
             rs.pending_tool_call = None
         # Special-case file edits: show only the file + colored +adds/-dels.
-        if d["ok"] and name in ("write_file", "edit_file"):
+        if d["ok"] and name in ("write_file", "edit_file", "multi_edit"):
             import re as _re_edit
             m = _re_edit.match(r"OK:\s+(\w+)\s+(.+?)\s+\+(\d+)\s+-(\d+)\s*$", result)
+            m_multi = _re_edit.match(
+                r"OK:\s+applied\s+(\d+)\s+edits?\s+to\s+(.+?)\s+\+(\d+)\s+-(\d+)", result
+            )
+            if m_multi:
+                n_edits, path, adds, dels = m_multi.groups()
+                print(
+                    ui.color("    ✓", ui.OK)
+                    + " " + ui.color(f"multi_edit ({n_edits})", ui.TEAL_BRIGHT)
+                    + " " + ui.color(path, ui.SURFACE)
+                    + "  " + ui.color(f"+{adds}", ui.OK)
+                    + " " + ui.color(f"-{dels}", ui.ERR)
+                )
+                return
             if m:
                 op, path, adds, dels = m.group(1), m.group(2), m.group(3), m.group(4)
                 mark = ui.color("    ✓", ui.OK)
