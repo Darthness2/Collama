@@ -313,8 +313,8 @@ How to use the tools:
   one edit_file call per spot. Read the file ONCE, work out EVERY
   change, then send them all in a SINGLE multi_edit call:
       multi_edit(path, edits=[
-        {old_string: "...", new_string: "..."},
-        {old_string: "...", new_string: "..."},
+        {{"old_string": "...", "new_string": "..."}},
+        {{"old_string": "...", "new_string": "..."}},
         ... every change for this file ...
       ])
   multi_edit is atomic — if one edit doesn't match, nothing is written
