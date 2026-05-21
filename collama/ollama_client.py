@@ -22,7 +22,15 @@ def _normalize_host(host: str) -> str:
     'http://example' and rewrites them to include a scheme and (if missing)
     Ollama's default port 11434. URLs that already include both — or a
     custom path — are left alone.
+
+    Wildcard bind addresses are remapped to loopback: '0.0.0.0' (and IPv6
+    '::' / '[::]') are what the Ollama SERVER listens on to accept
+    connections on every interface — they are NOT routable connect
+    targets. Connecting to 0.0.0.0 happens to work on Linux but fails on
+    macOS and Windows, so a config of OLLAMA_HOST=0.0.0.0 must become
+    127.0.0.1 for the client.
     """
+    import re
     from urllib.parse import urlparse, urlunparse
 
     s = (host or "").strip().rstrip("/")
@@ -30,6 +38,19 @@ def _normalize_host(host: str) -> str:
         return "http://localhost:11434"
     if "://" not in s:
         s = "http://" + s
+
+    # Remap wildcard / unspecified bind addresses to loopback BEFORE parsing.
+    # Done as a string swap because a bare 'http://::' is malformed enough
+    # that urlparse().port raises — IPv6 hosts need brackets. The host token
+    # sits right after the scheme and ends at a ':' (port), '/' (path), or EOL.
+    s = re.sub(
+        r"^([A-Za-z][A-Za-z0-9+.\-]*://)"          # scheme://
+        r"(?:0\.0\.0\.0|\[::\]|::|0:0:0:0:0:0:0:0)"  # wildcard host
+        r"(?=[:/]|$)",                               # followed by port/path/EOL
+        r"\g<1>127.0.0.1",
+        s,
+    )
+
     p = urlparse(s)
     # If no explicit port AND no path component, assume Ollama's default port.
     if not p.port and not p.path:
