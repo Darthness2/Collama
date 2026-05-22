@@ -148,15 +148,18 @@ class _RenderState:
     # can suppress BOTH lines (the user shouldn't see internal recovery).
     pending_tool_call: tuple[str, str] | None = None
     # Collapsible-tool run: consecutive calls of the same simple tool
-    # (read_file, list_dir, …) fold into ONE line that updates in place —
-    # "▸ read 5 files" instead of ten ▸/✓ pairs.
-    run_cat: str | None = None     # tool name of the current run, or None
+    # (read_file, list_dir, …) — or any run of file edits — fold into ONE
+    # line that updates in place ("▸ read 5 files", "▸ edited 5 files").
+    run_cat: str | None = None     # run category, or None. "edit" for edits.
     run_count: int = 0             # calls in the current run
     run_fail: int = 0              # how many of them failed
     run_summary: str = ""          # first call's summary (shown when count == 1)
+    run_tool: str = ""             # first call's tool name (edit runs, count 1)
+    run_adds: int = 0              # total lines added across an edit run
+    run_dels: int = 0              # total lines removed across an edit run
 
 
-# File-mutating tools — rendered as a single "▸ tool  path  +N -M" line.
+# File-mutating tools — collapse into one "▸ edited N files  +A -D" run.
 _MUTATING_TOOLS = {"write_file", "edit_file", "multi_edit", "replace_lines"}
 
 # Tools whose consecutive calls collapse into a single tally line.
@@ -177,10 +180,47 @@ def _finalize_run(rs: _RenderState) -> None:
     rs.run_count = 0
     rs.run_fail = 0
     rs.run_summary = ""
+    rs.run_tool = ""
+    rs.run_adds = 0
+    rs.run_dels = 0
+
+
+def _parse_diff_stats(result: str) -> tuple[int, int]:
+    """Pull the trailing '+adds -dels' counts out of an edit tool result."""
+    import re as _re
+    m = _re.search(r"\+(\d+)\s+-(\d+)", result or "")
+    return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+
+
+def _single_edit_line(name: str, summary: str, ok: bool,
+                      first_line: str, adds: int, dels: int) -> str:
+    """One-line render of a single file edit: '▸ write_file  ~/path  +9 -0'."""
+    accent = ui.TEAL_BRIGHT if ok else ui.ERR
+    line = ui.color("  ▸ ", accent) + ui.color(name, accent)
+    if summary:
+        line += ui.color("  " + ui.tilde(summary), ui.MUTED if ok else ui.ERR)
+    if ok:
+        line += ("  " + ui.color(f"+{adds}", ui.OK)
+                 + " " + ui.color(f"-{dels}", ui.ERR))
+    else:
+        err = first_line.split("ERROR:", 1)[-1].strip()
+        line += ui.color(f"  ✗ {err}", ui.ERR)
+    return line
+
+
+def _edit_run_line(rs: _RenderState) -> str:
+    """Collapsed render of 2+ edits: '▸ edited 5 files  +363 -266'."""
+    txt = f"edited {rs.run_count} files"
+    line = ui.color("  ▸ ", ui.TEAL_BRIGHT) + ui.color(txt, ui.TEAL_BRIGHT)
+    line += ("  " + ui.color(f"+{rs.run_adds}", ui.OK)
+             + " " + ui.color(f"-{rs.run_dels}", ui.ERR))
+    if rs.run_fail:
+        line += ui.color(f"  ({rs.run_fail} failed)", ui.ERR)
+    return line
 
 
 def _run_line(rs: _RenderState) -> str:
-    """Build the single line that represents the current run."""
+    """Build the single line that represents the current read/list/grep run."""
     verb, _singular, plural = _RUN_CATEGORIES[rs.run_cat]  # type: ignore[index]
     failed = rs.run_fail > 0
     accent = ui.ERR if failed else ui.TEAL_BRIGHT
@@ -305,30 +345,31 @@ def render_event(event: Message, rs: _RenderState) -> None:
                 print(_run_line(rs))
             return
 
-        # Non-collapsible tool — close any run.
-        _finalize_run(rs)
-
-        # File-mutating tools render as ONE line: "▸ write_file  ~/path  +N -M"
-        # — no separate ✓ line. Added/removed counts are colored green/red.
+        # File-mutating tools collapse into one "▸ edited N files +A -D" run,
+        # exactly like read_file. A lone edit shows "▸ write_file ~/path +9 -0".
         if name in _MUTATING_TOOLS:
             ok = bool(d["ok"])
-            accent = ui.TEAL_BRIGHT if ok else ui.ERR
-            line = ui.color("  ▸ ", accent) + ui.color(name, accent)
-            if summary:
-                line += ui.color("  " + ui.tilde(summary),
-                                  ui.MUTED if ok else ui.ERR)
-            if ok:
-                import re as _re_edit
-                stat = _re_edit.search(r"\+(\d+)\s+-(\d+)", result)
-                if stat:
-                    line += ("  " + ui.color(f"+{stat.group(1)}", ui.OK)
-                             + " " + ui.color(f"-{stat.group(2)}", ui.ERR))
+            adds, dels = _parse_diff_stats(result) if ok else (0, 0)
+            is_tty = sys.stdout.isatty()
+            if rs.run_cat == "edit" and is_tty:
+                rs.run_count += 1
+                rs.run_fail += 0 if ok else 1
+                rs.run_adds += adds
+                rs.run_dels += dels
+                sys.stdout.write("\033[A\r\033[2K" + _edit_run_line(rs) + "\n")
+                sys.stdout.flush()
             else:
-                err = first_line.split("ERROR:", 1)[-1].strip()
-                line += ui.color(f"  ✗ {err}", ui.ERR)
-            print(line)
+                _finalize_run(rs)
+                rs.run_cat = "edit"
+                rs.run_count = 1
+                rs.run_fail = 0 if ok else 1
+                rs.run_adds = adds
+                rs.run_dels = dels
+                print(_single_edit_line(name, summary, ok, first_line, adds, dels))
             return
 
+        # Truly non-collapsible tool — close any run, render normally.
+        _finalize_run(rs)
         ui.tool_call(name, summary)
         ui.tool_result(first_line[:160], ok=d["ok"])
     elif k == "info":
