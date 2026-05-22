@@ -621,45 +621,25 @@ class Spinner:
             return
         import shutil
         i = 0
-        last_label_idx = -1
         while not self._stop.is_set():
             frame = _SPIN_FRAMES[i % len(_SPIN_FRAMES)]
             elapsed = time.monotonic() - self._t0
-            # When the label escalates, print the new tier as a static info
-            # line *above* the spinner instead of inlining it. Keeps the
-            # animated line short enough to never wrap on 80-col terminals,
-            # which used to scroll a fresh row into scrollback every frame.
-            label_idx = 0
-            for j, (after, _) in enumerate(self.escalations, start=1):
-                if elapsed >= after:
-                    label_idx = j
-                else:
-                    break
-            if label_idx != last_label_idx and label_idx > 0:
-                # New tier crossed — print the explanation once, then keep
-                # the spinner short.
-                _, tier_label = self.escalations[label_idx - 1]
-                sys.stdout.write("\r\033[2K" + color("  · " + tier_label, MUTED) + "\n")
-                sys.stdout.flush()
-                last_label_idx = label_idx
-            short_label = self.label  # always the BASE label, not escalated
+            label = self._current_label(elapsed)
             timer = f"({elapsed:0.1f}s)"
-            raw_visible = f"  {frame} {short_label}…  {timer}"
-            # Hard-truncate to terminal width so the line can't wrap. We size
-            # off visible chars (no ANSI) since color codes add bytes but
-            # zero columns.
+            # Build the plain (ANSI-free) line first so we can measure it and
+            # hard-truncate to terminal width — a line that wraps would make
+            # \r\033[2K only clear the last visual row, scrolling the rest
+            # into scrollback every frame.
+            raw_visible = f"  {frame} {label}…  {timer}"
             cols = shutil.get_terminal_size((80, 24)).columns
             if len(raw_visible) > cols - 1:
-                raw_visible = raw_visible[: max(1, cols - 2)] + "…"
-                # Rebuild a styled version that matches the truncated text.
-                # Approximation: color the whole truncated string as MUTED.
-                styled = color(raw_visible, MUTED)
+                styled = color(raw_visible[: max(1, cols - 2)] + "…", MUTED)
             else:
                 styled = (
                     "  "
                     + color(frame, self.color_c)
                     + " "
-                    + color(short_label + "…", MUTED)
+                    + color(label + "…", MUTED)
                     + "  "
                     + color(timer, SOFT)
                 )
@@ -799,16 +779,31 @@ def plan(items: list[str]) -> None:
     panel(body, title="plan", style="thick", color_c=TEAL, title_c=TEAL_BRIGHT)
 
 
+def tilde(s: str) -> str:
+    """Collapse the user's home directory prefix to '~' anywhere it appears
+    in `s`. Keeps tool lines short and avoids leaking the full home path."""
+    if not s:
+        return s
+    import os
+    from pathlib import Path
+    home = str(Path.home())
+    out = s.replace(home, "~")
+    # Also handle a differently-cased / trailing-slash home on Windows.
+    if os.sep != "/":
+        out = out.replace(home.replace("/", os.sep), "~")
+    return out
+
+
 def tool_call(name: str, summary: str) -> None:
     head = color("  ▸ ", TEAL_BRIGHT) + color(name, TEAL_BRIGHT)
     if summary:
-        head += color(f"  {summary}", MUTED)
+        head += color(f"  {tilde(summary)}", MUTED)
     print(head)
 
 
 def tool_result(summary: str, ok: bool = True) -> None:
     mark = color("    ✓", OK) if ok else color("    ✗", ERR)
-    print(mark + color(f" {summary}", MUTED))
+    print(mark + color(f" {tilde(summary)}", MUTED))
 
 
 # ---------- banner ----------

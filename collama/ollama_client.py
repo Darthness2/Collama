@@ -157,9 +157,14 @@ class OllamaClient:
             opts.setdefault("num_ctx", self.num_ctx)
         # Many models in the Ollama library ship with a baked-in num_predict
         # cap (often 128/256), which truncates the assistant mid-sentence.
-        # -1 = generate until natural stop / num_ctx. Explicit so the model
-        # default never silently clips the response.
-        if self.num_predict is not None and opts is not None:
+        # A negative value (-1) means "generate until natural stop" on local
+        # Ollama's native /api/chat — but Ollama's CLOUD endpoint validates
+        # this as OpenAI-style max_tokens and rejects anything <= 0 with
+        # 'max_tokens must be positive'. So only send num_predict when it is
+        # a positive int; when it's -1/0 we OMIT it, which on local Ollama
+        # already defaults to unlimited and on cloud lets the server pick.
+        if (self.num_predict is not None and self.num_predict > 0
+                and opts is not None):
             opts.setdefault("num_predict", self.num_predict)
 
     def list_models(self) -> list[str]:

@@ -147,6 +147,52 @@ class _RenderState:
     # '▸ name  summary' until the result arrives so CACHED read_file events
     # can suppress BOTH lines (the user shouldn't see internal recovery).
     pending_tool_call: tuple[str, str] | None = None
+    # Collapsible-tool run: consecutive calls of the same simple tool
+    # (read_file, list_dir, …) fold into ONE line that updates in place —
+    # "▸ read 5 files" instead of ten ▸/✓ pairs.
+    run_cat: str | None = None     # tool name of the current run, or None
+    run_count: int = 0             # calls in the current run
+    run_fail: int = 0              # how many of them failed
+    run_summary: str = ""          # first call's summary (shown when count == 1)
+
+
+# Tools whose consecutive calls collapse into a single tally line.
+# Maps tool name -> (verb, singular noun, plural noun).
+_RUN_CATEGORIES: dict[str, tuple[str, str, str]] = {
+    "read_file": ("read", "file", "files"),
+    "list_dir":  ("listed", "directory", "directories"),
+    "grep":      ("ran", "search", "searches"),
+    "glob":      ("ran", "glob", "globs"),
+    "run_bash":  ("ran", "command", "commands"),
+}
+
+
+def _finalize_run(rs: _RenderState) -> None:
+    """Close the current collapsible-tool run. The run line is already on
+    screen (committed with a trailing newline), so this only resets state."""
+    rs.run_cat = None
+    rs.run_count = 0
+    rs.run_fail = 0
+    rs.run_summary = ""
+
+
+def _run_line(rs: _RenderState) -> str:
+    """Build the single line that represents the current run."""
+    verb, _singular, plural = _RUN_CATEGORIES[rs.run_cat]  # type: ignore[index]
+    failed = rs.run_fail > 0
+    accent = ui.ERR if failed else ui.TEAL_BRIGHT
+    if rs.run_count == 1:
+        # Looks like a normal tool_call line: "▸ read_file  ~/path".
+        line = ui.color("  ▸ ", accent) + ui.color(rs.run_cat or "", accent)
+        detail = ui.tilde(rs.run_summary)
+        if detail:
+            line += ui.color(f"  {detail}", ui.ERR if failed else ui.MUTED)
+        return line
+    txt = f"{verb} {rs.run_count} {plural}"
+    line = ui.color("  ▸ ", accent) + ui.color(txt, accent)
+    if failed:
+        line += ui.color(f"  ({rs.run_fail} failed)", ui.ERR)
+    return line
 
 
 def _end_stream_line(rs: _RenderState) -> None:
@@ -172,6 +218,11 @@ def render_event(event: Message, rs: _RenderState) -> None:
     # Any non-delta event ends an in-progress streamed line first.
     if k != "delta":
         _end_stream_line(rs)
+
+    # Any event that isn't part of a tool run closes an open run. tool_call
+    # is exempt (it belongs to the run); tool_result manages the run itself.
+    if k not in ("tool_call", "tool_result"):
+        _finalize_run(rs)
 
     if k == "thinking":
         ui.thinking(d["text"])
@@ -218,17 +269,42 @@ def render_event(event: Message, rs: _RenderState) -> None:
         name = d.get("name") or ""
         result = d.get("result") or ""
         first_line = d.get("first_line") or ""
+        ok = bool(d["ok"])
         # If the result is a CACHED nudge, drop BOTH the tool_call line and
         # the result line. The user already saw the file the first time
         # around; redundant reads are internal-only.
         if first_line.startswith("[CACHED"):
             rs.pending_tool_call = None
             return
-        # Now flush the pending tool_call (we know the result is real).
+        # Pull the deferred tool_call summary (we now know the result is real).
+        summary = ""
         if rs.pending_tool_call is not None:
-            pname, psummary = rs.pending_tool_call
-            ui.tool_call(pname, psummary)
+            _, summary = rs.pending_tool_call
             rs.pending_tool_call = None
+
+        # Collapsible tools (read_file, list_dir, grep, glob, run_bash) fold
+        # consecutive calls into one self-updating "▸ read 5 files" line.
+        if name in _RUN_CATEGORIES:
+            is_tty = sys.stdout.isatty()
+            if rs.run_cat == name and is_tty:
+                # Continue the run: bump counts, rewrite the line in place.
+                rs.run_count += 1
+                rs.run_fail += 0 if ok else 1
+                sys.stdout.write("\033[A\r\033[2K" + _run_line(rs) + "\n")
+                sys.stdout.flush()
+            else:
+                # Start a fresh run (also the non-TTY path: one line per call).
+                _finalize_run(rs)
+                rs.run_cat = name
+                rs.run_count = 1
+                rs.run_fail = 0 if ok else 1
+                rs.run_summary = summary
+                print(_run_line(rs))
+            return
+
+        # Non-collapsible tool — close any run, then render normally.
+        _finalize_run(rs)
+        ui.tool_call(name, summary)
         # Special-case file edits: show only the file + colored +adds/-dels.
         if d["ok"] and name in ("write_file", "edit_file", "multi_edit"):
             import re as _re_edit
