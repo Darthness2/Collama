@@ -120,6 +120,10 @@ def _pad(s: str, w: int) -> str:
 # ---------- markdown rendering ----------
 
 _MD_FENCE_RX = re.compile(r"```([A-Za-z0-9_+\-]*)\n(.*?)```", re.DOTALL)
+# A whole line that is JUST a fence marker (```lang or ``` or ~~~). Used by
+# the streaming renderer, which sees one line at a time and can't use the
+# multi-line _MD_FENCE_RX.
+_MD_FENCE_LINE_RX = re.compile(r"^(?:`{3,}|~{3,})\s*([A-Za-z0-9_+\-]*)\s*$")
 _MD_INLINE_CODE_RX = re.compile(r"`([^`\n]+)`")
 _MD_BOLD_RX = re.compile(r"\*\*([^*\n]+)\*\*")
 _MD_ITALIC_AST_RX = re.compile(r"(?<![*\w])\*([^*\n]+?)\*(?!\w)")
@@ -238,6 +242,7 @@ class StreamMarkdown:
         self.mid_line = False
         self.in_dim = False        # currently inside a <think> block
         self.dim_opened = False    # have we emitted any dim line in current block?
+        self.in_code = False       # currently inside a ``` fenced code block
         self.suppress_until: str | None = None  # close marker if currently eliding
         self._max_open = max(len(o) for o, _, _ in self.SUPPRESS_PAIRS)
         # True iff we've emitted at least one non-dim, non-empty line.
@@ -246,31 +251,58 @@ class StreamMarkdown:
         # response in <plan>/<think> tags and the stream looks empty.
         self.visible_emitted = False
 
+    def _consume_prefix(self) -> str:
+        """The line prefix for the next emit, advancing the first/cont state."""
+        if self.mid_line:
+            return ""
+        if self.in_dim:
+            if not self.dim_opened:
+                self.dim_opened = True
+                return self.dim_first_prefix
+            return self.dim_cont_prefix
+        if not self.opened:
+            self.opened = True
+            return self.first_prefix
+        return self.cont_prefix
+
     def _emit_line(self, line: str, terminator: str) -> None:
         if not self.in_dim and line.strip():
             self.visible_emitted = True
+
+        # Fenced code blocks. render_markdown() only catches fences in
+        # whole-text mode; here we see one line at a time, so we track the
+        # open/close state ourselves and render the interior as code instead
+        # of leaking literal ``` and unstyled source into the answer.
+        fence = None if self.mid_line else _MD_FENCE_LINE_RX.match(line.strip())
+        if fence is not None:
+            prefix = self._consume_prefix()
+            if not self.in_code:
+                self.in_code = True
+                lang = fence.group(1)
+                bar = color("  ┌─ " + (lang or "code"), TEAL_DIM)
+            else:
+                self.in_code = False
+                bar = color("  └─", TEAL_DIM)
+            self.emit(prefix + bar + terminator)
+            self.mid_line = (terminator == "")
+            return
+        if self.in_code:
+            prefix = self._consume_prefix()
+            bar = color("  │ ", TEAL_DIM) if not self.mid_line else ""
+            self.emit(prefix + bar + color(line, TEAL_BRIGHT) + terminator)
+            self.mid_line = (terminator == "")
+            return
+
         if self.in_dim:
             # Dim block — italic gray, '◦' prefix for the first line of the
             # block, indented continuation after.
-            if self.mid_line:
-                prefix = ""
-            elif not self.dim_opened:
-                prefix = self.dim_first_prefix
-                self.dim_opened = True
-            else:
-                prefix = self.dim_cont_prefix
+            prefix = self._consume_prefix()
             # MUTED (246) is more legible than SOFT (240) on dark terminals;
             # the model's reasoning is worth reading, not squinting at.
             styled = color(line, MUTED + ITALIC) if line else ""
             self.emit(prefix + styled + terminator)
         else:
-            if self.mid_line:
-                prefix = ""
-            elif not self.opened:
-                prefix = self.first_prefix
-            else:
-                prefix = self.cont_prefix
-            self.opened = True
+            prefix = self._consume_prefix()
             self.emit(prefix + render_markdown(line) + terminator)
         self.mid_line = (terminator == "")
 
@@ -395,22 +427,17 @@ class StreamMarkdown:
                     self._emit_line(line, "\n")
                 continue
 
-            # Single line, no newline. Hold back enough chars to detect a
-            # partial open marker. On final flush, emit everything.
+            # Single line, no newline yet. Hold the WHOLE partial line until
+            # its newline arrives (or final flush). Emitting partials as
+            # continuations breaks per-line markdown — a header / bold / fence
+            # split across two feed() chunks would never match its regex.
+            # Buffering the line costs at most one line of latency and makes
+            # markdown rendering reliable. Any open marker was already located
+            # by the search above, so holding here can't miss one.
             if final:
                 if self.buf:
                     self._emit_line(self.buf, "")
                     self.buf = ""
-                return
-            keep = self._max_open - 1
-            if len(self.buf) > keep:
-                # The prefix can't contain a complete open marker that hasn't
-                # been found above; safe to emit as a line continuation.
-                emit_now = self.buf[:-keep]
-                self.buf = self.buf[-keep:]
-                if emit_now:
-                    # Treat as a partial line (no newline yet).
-                    self._emit_line(emit_now, "")
             return
 
 
@@ -505,10 +532,10 @@ def hr(char: str = "─", c: str = TEAL_DIM) -> None:
 
 # ---------- spinner ----------
 
-# Default: a little axolotl swimming back and forth — appears on the line the
-# agent is currently working on (thinking / running a shell command / etc.).
-# The braille frames are kept as a fallback for terminals without good unicode
-# support (NO_COLOR or COLLAMA_SPINNER=braille).
+# Default: a calm braille spinner — a single glyph that cycles in ONE fixed
+# column. No left/right drift, no width change, so it doesn't pull the eye.
+# The axolotl is kept as an opt-in (COLLAMA_SPINNER=axolotl) for those who
+# liked it.
 _AXOLOTL_FRAMES = (
     "~(◕‿◕)~",
     "~(◕‿◕)~~",
@@ -528,10 +555,10 @@ _BRAILLE_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇"
 
 
 def _default_frames() -> tuple[str, ...]:
-    style = os.environ.get("COLLAMA_SPINNER", "axolotl").lower()
-    if style == "braille":
-        return _BRAILLE_FRAMES
-    return _AXOLOTL_FRAMES
+    style = os.environ.get("COLLAMA_SPINNER", "braille").lower()
+    if style == "axolotl":
+        return _AXOLOTL_FRAMES
+    return _BRAILLE_FRAMES
 
 
 _SPIN_FRAMES = _default_frames()
@@ -625,7 +652,9 @@ class Spinner:
             frame = _SPIN_FRAMES[i % len(_SPIN_FRAMES)]
             elapsed = time.monotonic() - self._t0
             label = self._current_label(elapsed)
-            timer = f"({elapsed:0.1f}s)"
+            # Whole seconds — a decimal ticking 10×/s is its own kind of
+            # visual noise. The braille glyph already signals liveness.
+            timer = f"({elapsed:0.0f}s)"
             # Build the plain (ANSI-free) line first so we can measure it and
             # hard-truncate to terminal width — a line that wraps would make
             # \r\033[2K only clear the last visual row, scrolling the rest
@@ -646,8 +675,8 @@ class Spinner:
             sys.stdout.write("\r\033[2K" + styled)
             sys.stdout.flush()
             i += 1
-            # Wait in small increments so .stop() reacts quickly.
-            self._stop.wait(0.08)
+            # ~8 fps — quick enough to read as alive, slow enough to be calm.
+            self._stop.wait(0.12)
 
     def __enter__(self) -> "Spinner":
         self.start()

@@ -721,21 +721,6 @@ class QueryEngine:
                 )
                 self.messages.append({"role": "user", "content": inject})
                 yield Message("warn", {"text": f"background {note['id']} {note['status']} — injected into context"})
-            # Pre-flight visibility: estimate prompt size so the user sees
-            # what's about to take a while. Only emit when context is large
-            # enough to matter — otherwise it's noise.
-            est_tokens = sum(
-                len(str(m.get("content") or "")) // 4 for m in self.messages
-            )
-            if est_tokens >= 4000:
-                tool_count = len(all_tool_schemas(self.state.tool_groups)) if self.state.tools_enabled else 0
-                yield Message("info", {
-                    "text": (
-                        f"sending ~{est_tokens:,} tokens to {self.model}"
-                        + (f" · {tool_count} tools" if tool_count else "")
-                        + "  (prompt-eval can take a while on local hardware)"
-                    ),
-                })
             try:
                 msg, usage = self._chat_once(yield_deltas=self.stream)
                 if isinstance(msg, _StreamGen):
