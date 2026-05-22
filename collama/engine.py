@@ -207,8 +207,12 @@ def _strip_fakes(text: str) -> tuple[bool, str]:
 
 
 def _summarize_args(name: str, args: dict) -> str:
-    if name in ("read_file", "write_file", "edit_file"):
+    if name in ("read_file", "write_file", "edit_file", "multi_edit"):
         return str(args.get("path", ""))
+    if name == "replace_lines":
+        path = str(args.get("path", ""))
+        start, end = args.get("start_line"), args.get("end_line")
+        return f"{path}:{start}-{end}" if start is not None else path
     if name == "list_dir":
         return str(args.get("path", "."))
     if name == "grep":

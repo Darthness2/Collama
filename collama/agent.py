@@ -156,6 +156,9 @@ class _RenderState:
     run_summary: str = ""          # first call's summary (shown when count == 1)
 
 
+# File-mutating tools — rendered as a single "▸ tool  path  +N -M" line.
+_MUTATING_TOOLS = {"write_file", "edit_file", "multi_edit", "replace_lines"}
+
 # Tools whose consecutive calls collapse into a single tally line.
 # Maps tool name -> (verb, singular noun, plural noun).
 _RUN_CATEGORIES: dict[str, tuple[str, str, str]] = {
@@ -302,36 +305,31 @@ def render_event(event: Message, rs: _RenderState) -> None:
                 print(_run_line(rs))
             return
 
-        # Non-collapsible tool — close any run, then render normally.
+        # Non-collapsible tool — close any run.
         _finalize_run(rs)
+
+        # File-mutating tools render as ONE line: "▸ write_file  ~/path  +N -M"
+        # — no separate ✓ line. Added/removed counts are colored green/red.
+        if name in _MUTATING_TOOLS:
+            ok = bool(d["ok"])
+            accent = ui.TEAL_BRIGHT if ok else ui.ERR
+            line = ui.color("  ▸ ", accent) + ui.color(name, accent)
+            if summary:
+                line += ui.color("  " + ui.tilde(summary),
+                                  ui.MUTED if ok else ui.ERR)
+            if ok:
+                import re as _re_edit
+                stat = _re_edit.search(r"\+(\d+)\s+-(\d+)", result)
+                if stat:
+                    line += ("  " + ui.color(f"+{stat.group(1)}", ui.OK)
+                             + " " + ui.color(f"-{stat.group(2)}", ui.ERR))
+            else:
+                err = first_line.split("ERROR:", 1)[-1].strip()
+                line += ui.color(f"  ✗ {err}", ui.ERR)
+            print(line)
+            return
+
         ui.tool_call(name, summary)
-        # Special-case file edits: show only the file + colored +adds/-dels.
-        if d["ok"] and name in ("write_file", "edit_file", "multi_edit"):
-            import re as _re_edit
-            m = _re_edit.match(r"OK:\s+(\w+)\s+(.+?)\s+\+(\d+)\s+-(\d+)\s*$", result)
-            m_multi = _re_edit.match(
-                r"OK:\s+applied\s+(\d+)\s+edits?\s+to\s+(.+?)\s+\+(\d+)\s+-(\d+)", result
-            )
-            if m_multi:
-                n_edits, path, adds, dels = m_multi.groups()
-                print(
-                    ui.color("    ✓", ui.OK)
-                    + " " + ui.color(f"multi_edit ({n_edits})", ui.TEAL_BRIGHT)
-                    + " " + ui.color(path, ui.SURFACE)
-                    + "  " + ui.color(f"+{adds}", ui.OK)
-                    + " " + ui.color(f"-{dels}", ui.ERR)
-                )
-                return
-            if m:
-                op, path, adds, dels = m.group(1), m.group(2), m.group(3), m.group(4)
-                mark = ui.color("    ✓", ui.OK)
-                print(
-                    mark + " " + ui.color(op, ui.TEAL_BRIGHT)
-                    + " " + ui.color(path, ui.SURFACE)
-                    + "  " + ui.color(f"+{adds}", ui.OK)
-                    + " " + ui.color(f"-{dels}", ui.ERR)
-                )
-                return
         ui.tool_result(first_line[:160], ok=d["ok"])
     elif k == "info":
         ui.info(d["text"])
