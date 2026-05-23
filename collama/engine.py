@@ -62,7 +62,11 @@ from .tools import ToolContext, all_tool_schemas, dispatch
 
 
 MAX_TOOL_ITERATIONS = 1000
-LOOP_THRESHOLD = 2  # small models loop hard; be aggressive
+LOOP_THRESHOLD = 4  # tightened from 2 — at 2 a single retry tripped it,
+# producing constant "steering hard" warnings on perfectly normal model
+# behavior. 4 identical results in a turn is a genuine sign of being stuck.
+ARGS_LOOP_THRESHOLD = 3  # consecutive identical-arg calls — a stronger signal
+# than result repetition, so a slightly lower bar is reasonable.
 COMPACT_TOKENS = 12000
 COMPACT_KEEP_RECENT = 12
 
@@ -1021,7 +1025,7 @@ class QueryEngine:
             else:
                 break
         self._recent_calls = self._recent_calls[-12:]
-        if run >= LOOP_THRESHOLD:
+        if run >= ARGS_LOOP_THRESHOLD:
             self._recent_calls = []
             self.messages.append({
                 "role": "user",
@@ -1118,6 +1122,12 @@ class QueryEngine:
                 _mutating = name in ("edit_file", "write_file", "replace_lines",
                                      "multi_edit", "notebook_edit")
                 if _mutating and d.get("ok"):
+                    continue
+                # CACHED read_file results are internal no-ops — they already
+                # nudge the model not to re-read. Counting them as a loop
+                # double-punishes the same situation and surfaces a noisy
+                # "steering hard" warning for nothing.
+                if result.startswith("[CACHED") or (d.get("first_line") or "").startswith("[CACHED"):
                     continue
                 seen = self._result_loop_count(name, result)
                 if seen == LOOP_THRESHOLD:
