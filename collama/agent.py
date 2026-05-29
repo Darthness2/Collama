@@ -226,7 +226,12 @@ def _run_line(rs: _RenderState) -> str:
     accent = ui.ERR if failed else ui.TEAL_BRIGHT
     if rs.run_count == 1:
         # Looks like a normal tool_call line: "▸ read_file  ~/path".
+        # run_bash is a deliberate exception — the command itself is noise.
+        # Whether it succeeded is the only thing worth showing, and the
+        # accent color already carries that signal (red on fail, teal on ok).
         line = ui.color("  ▸ ", accent) + ui.color(rs.run_cat or "", accent)
+        if rs.run_cat == "run_bash":
+            return line
         detail = ui.tilde(rs.run_summary)
         if detail:
             line += ui.color(f"  {detail}", ui.ERR if failed else ui.MUTED)
