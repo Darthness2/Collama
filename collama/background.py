@@ -124,7 +124,8 @@ class BackgroundExecutor:
         try:
             proc = subprocess.run(
                 command, shell=True, cwd=str(cwd),
-                capture_output=True, text=True, timeout=timeout,
+                capture_output=True,
+                encoding="utf-8", errors="replace", timeout=timeout,
             )
             ok = proc.returncode == 0
             parts = [f"exit code: {proc.returncode}"]

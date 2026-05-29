@@ -559,7 +559,8 @@ def repl(agent: Agent, cfg: dict) -> int:
                     import subprocess as _sp
                     r = _sp.run(
                         ["git", "-C", str(agent.ctx.root), "rev-parse", "--abbrev-ref", "HEAD"],
-                        capture_output=True, text=True, timeout=2,
+                        capture_output=True,
+                        encoding="utf-8", errors="replace", timeout=2,
                     )
                     if r.returncode == 0 and r.stdout.strip():
                         ws_line += f"  (git: {r.stdout.strip()})"

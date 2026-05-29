@@ -614,7 +614,9 @@ def t_grep(args: dict, ctx: ToolContext) -> str:
             cmd.append("-i")
         cmd.extend(["--", pattern, str(p)])
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            proc = subprocess.run(cmd, capture_output=True,
+                                  encoding="utf-8", errors="replace",
+                                  timeout=30)
         except subprocess.TimeoutExpired:
             return "ERROR: rg timed out after 30s"
         if proc.returncode in (0, 1):  # 0=hits, 1=no hits (not an error)
@@ -1046,7 +1048,8 @@ def t_powershell(args: dict, ctx: ToolContext) -> str:
     try:
         proc = subprocess.run(
             [pwsh, "-NoProfile", "-NonInteractive", "-Command", cmd],
-            cwd=str(ctx.root), capture_output=True, text=True, timeout=timeout,
+            cwd=str(ctx.root), capture_output=True,
+            encoding="utf-8", errors="replace", timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         return f"ERROR: timed out after {timeout}s"
@@ -1516,7 +1519,7 @@ def _check_via_cmd(cmd: list[str], src: str | None, label: str) -> tuple[bool, s
             cmd,
             input=src if src is not None else None,
             capture_output=True,
-            text=True,
+            encoding="utf-8", errors="replace",
             timeout=15,
         )
     except FileNotFoundError:
@@ -1736,7 +1739,8 @@ def t_run_bash(args: dict, ctx: ToolContext) -> str:
         with ui.Spinner(f"running: {cmd[:40] + ('…' if len(cmd) > 40 else '')}"):
             proc = subprocess.run(
                 cmd, shell=True, cwd=str(ctx.root),
-                capture_output=True, text=True, timeout=timeout,
+                capture_output=True,
+                encoding="utf-8", errors="replace", timeout=timeout,
             )
     except subprocess.TimeoutExpired:
         return f"ERROR: timed out after {timeout}s — the command was still running."
