@@ -67,6 +67,9 @@ LOOP_THRESHOLD = 4  # tightened from 2 — at 2 a single retry tripped it,
 # behavior. 4 identical results in a turn is a genuine sign of being stuck.
 ARGS_LOOP_THRESHOLD = 3  # consecutive identical-arg calls — a stronger signal
 # than result repetition, so a slightly lower bar is reasonable.
+LOOP_ABORT_THRESHOLD = 16  # hard turn-kill. Way above LOOP_THRESHOLD so we
+# only abort on genuine runaway repetition, not normal recovery. Forcing the
+# user to type /retry on every minor loop was the #1 friction point.
 COMPACT_TOKENS = 12000
 COMPACT_KEEP_RECENT = 12
 
@@ -907,13 +910,7 @@ class QueryEngine:
                 # 'Stopped' with no content.
                 salvaged = self._last_assistant_narration()
                 if salvaged:
-                    yield Message("assistant", {"text": (
-                        salvaged
-                        + "\n\n"
-                        + "_(I got stuck re-reading instead of acting on this. "
-                          "Tell me to '/retry' and just say 'apply that fix' "
-                          "to push it through.)_"
-                    )})
+                    yield Message("assistant", {"text": salvaged})
                 yield Message("done", {
                     "text": "Stopped: the model was stuck repeating the same tool call. "
                             "Try /retry, rephrase the request, or /new for a fresh context.",
@@ -1149,7 +1146,7 @@ class QueryEngine:
                             f"mandatory on your next turn — no more reads."
                         ),
                     })
-                elif seen >= LOOP_THRESHOLD * 2:
+                elif seen >= LOOP_ABORT_THRESHOLD:
                     yield Message("warn", {
                         "text": f"loop unbroken after {seen} identical results — ending turn"
                     })
