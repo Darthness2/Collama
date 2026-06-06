@@ -34,10 +34,21 @@ CONCURRENT_SAFE: set[str] = READ_ONLY | {"set_workspace"}
 # Resolver: (tool_name, args, state) -> 'yes' | 'always' | 'no' | 'never'
 Resolver = Callable[[str, dict, AppState], str]
 
+# PlanResolver: (plan_text) -> (approved, feedback). Used by the approve-then-
+# execute plan flow: the model presents a plan, the user approves it (so the
+# changes get made) or rejects it with optional feedback (so the model revises).
+PlanResolver = Callable[[str], "tuple[bool, str]"]
+
 
 def auto_deny_resolver(name: str, args: dict, state: AppState) -> str:
     """Default for headless / SDK use: never prompt, deny mutating ops."""
     return "no"
+
+
+def auto_reject_plan(plan: str) -> "tuple[bool, str]":
+    """Default plan resolver for headless / SDK use: never auto-approve a plan
+    (no human is present to approve), so the model stays read-only."""
+    return False, ""
 
 
 def can_use_tool(
@@ -133,3 +144,39 @@ def terminal_resolver(name: str, args: dict, state: AppState) -> str:
     if ans in ("y", "yes"):
         return "yes"
     return "no"
+
+
+def terminal_plan_resolver(plan: str) -> "tuple[bool, str]":
+    """Interactive REPL resolver for the approve-then-execute plan flow.
+
+    The plan itself has already been rendered to the screen (the engine emits a
+    'plan_review' event before calling this). Here we just collect the verdict:
+
+        y, yes           → approve: leave plan mode and make the changes
+        n, no, <Enter>   → reject: stay in plan mode, no feedback
+        <anything else>  → reject WITH that text as feedback for the model
+
+    Returns (approved, feedback).
+    """
+    from . import ui
+
+    # Clean terminal state before reading input (mirror terminal_resolver).
+    ui.stop_all_spinners()
+    import sys as _sys
+    if _sys.stdout.isatty():
+        _sys.stdout.write("\033[?25h")
+        _sys.stdout.flush()
+
+    ui.warn("\nReady to implement. Approve this plan?")
+    try:
+        ans = input("  [y]es make the changes / [n]o keep planning / or type feedback: ").strip()
+    except EOFError:
+        return False, ""
+
+    low = ans.lower()
+    if low in ("y", "yes", "approve", "ok", "go"):
+        return True, ""
+    if low in ("n", "no", ""):
+        return False, ""
+    # Anything else is treated as revision feedback for the model.
+    return False, ans

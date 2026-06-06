@@ -43,7 +43,7 @@ Slash commands:
   /wt                     show worktree stack (s12)
   /teams                  list teams and teammates (s09)
   /tick [team] [claim]    coordinator tick — process mailboxes; pass 'claim' to auto-claim tasks (s11)
-  /plan on|off            toggle plan mode (read-only, no mutating tools)
+  /plan on|off            toggle plan mode: model proposes a plan you approve before it makes changes
   /effort [low|medium|high]  show or set how much effort/thoroughness the model applies
   /todo [add|done|clear]  view or modify the session todo list
   /brief [name]           list briefs, or print one
@@ -516,7 +516,12 @@ def repl(agent: Agent, cfg: dict) -> int:
                     continue
                 agent.state.update(plan_mode=(want == "on"))
                 agent.engine.refresh_system_prompt()
-                ui.info(f"plan mode: {'ON (read-only)' if agent.state.plan_mode else 'off'}")
+                if agent.state.plan_mode:
+                    ui.info("plan mode: ON — the model investigates read-only and "
+                            "presents a plan for you to approve before it makes any "
+                            "changes. Approving applies the plan (and turns plan mode off).")
+                else:
+                    ui.info("plan mode: off")
                 continue
             if cmd == "todo":
                 todos = list(agent.state.todos or [])

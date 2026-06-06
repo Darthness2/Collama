@@ -105,7 +105,7 @@ Almost everything is also toggleable in the REPL: `/model`, `/host`, `/stream on
 ### Planning & work
 | | |
 |---|---|
-| `/plan on\|off` | plan mode — read-only, no mutating tools |
+| `/plan on\|off` | plan mode — the model explores read-only and presents a plan you must **approve** before it makes any changes (approving applies the plan and exits plan mode; rejecting with feedback makes it revise) |
 | `/effort [low\|medium\|high]` | show or set how much effort/thoroughness the model applies (bare `/effort` shows the current level) |
 | `/todo`, `/todo add <t>`, `/todo done <n>`, `/todo clear` | session todo list |
 | `/brief [name]` | show stored markdown briefs |

@@ -1260,7 +1260,10 @@ def t_enter_plan_mode(args: dict, ctx: ToolContext) -> str:
             engine.refresh_system_prompt()
         except Exception:
             pass
-    return "OK: PLAN MODE entered. Mutating tools (write_file, edit_file, run_bash, etc.) will be denied. Use exit_plan_mode to resume."
+    return ("OK: PLAN MODE entered (approve-then-execute). Mutating tools "
+            "(write_file, edit_file, run_bash, etc.) are denied. Investigate "
+            "read-only, then call exit_plan_mode with a `plan` for the user to "
+            "approve — only after approval can you make changes.")
 
 
 def t_exit_plan_mode(args: dict, ctx: ToolContext) -> str:
@@ -2249,8 +2252,10 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     }},
     {"type": "function", "function": {
         "name": "exit_plan_mode",
-        "description": "Leave plan mode; mutating tools allowed again.",
-        "parameters": {"type": "object", "properties": {}},
+        "description": "Signal that your plan is ready for the user to approve. Pass the full plan in `plan`. The user is asked to approve it; only on approval does plan mode turn off and let you make the actual changes.",
+        "parameters": {"type": "object", "properties": {
+            "plan": {"type": "string", "description": "The numbered plan of changes to present to the user for approval."},
+        }},
     }},
     {"type": "function", "function": {
         "name": "todo_write",

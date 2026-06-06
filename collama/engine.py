@@ -52,7 +52,14 @@ from . import ui
 from .background import BackgroundExecutor
 from .config import set_value
 from .ollama_client import OllamaClient, OllamaError, ToolsUnsupportedError
-from .permissions import CONCURRENT_SAFE, Resolver, auto_deny_resolver, can_use_tool
+from .permissions import (
+    CONCURRENT_SAFE,
+    PlanResolver,
+    Resolver,
+    auto_deny_resolver,
+    auto_reject_plan,
+    can_use_tool,
+)
 from .services.compact import BOUNDARY_MARKER, manage_context
 from .services.transcript import record as record_transcript
 from .state import AppState
@@ -77,7 +84,7 @@ COMPACT_KEEP_RECENT = 12
 # ---------------------------------------------------------------- events ----
 
 EventKind = Literal[
-    "system", "user", "thinking", "plan", "narration", "delta", "assistant",
+    "system", "user", "thinking", "plan", "plan_review", "narration", "delta", "assistant",
     "tool_call", "tool_denied", "tool_result",
     "info", "warn", "error", "compact", "done",
 ]
@@ -455,6 +462,30 @@ gh_list_pulls, gh_get_pull, gh_search_code, github_api.
     # model applies this turn (changeable live with /effort).
     base += _effort_section(getattr(state, "effort", "medium"))
 
+    # Plan mode — approve-then-execute. The model investigates read-only, then
+    # presents a plan the user must approve before any changes are made.
+    if getattr(state, "plan_mode", False):
+        base += """
+
+=== PLAN MODE IS ACTIVE (approve-then-execute) ===
+You are NOT allowed to change anything yet. Mutating tools (write_file,
+edit_file, multi_edit, replace_lines, run_bash, gh_create_*, etc.) are BLOCKED
+and will return a permission error.
+
+Your job this turn is to PLAN, not to act:
+1. Investigate with read-only tools only (read_file, grep, glob, list_dir) until
+   you understand exactly what needs to change.
+2. Then present a concise, NUMBERED plan of the precise changes you intend to
+   make — which files, what edits, and any commands you'd run to verify.
+3. Signal that the plan is ready by calling exit_plan_mode with a `plan`
+   argument containing that plan (or, if you can't call tools, just write the
+   plan as your final message and STOP).
+
+The user will be shown your plan and asked to APPROVE it. Do NOT implement
+anything now. Only after the user approves will plan mode turn off and let you
+make the actual changes. If the user rejects the plan, revise it (still
+read-only) and present it again."""
+
     # s05: KNOWLEDGE ON DEMAND — append CLAUDE.md / .collama.md / AGENTS.md from workspace and parents.
     memory = _load_claude_md(workspace, home)
     if memory:
@@ -666,6 +697,7 @@ class QueryEngine:
         config: dict | None = None,
         session_id: str | None = None,
         permission_resolver: Resolver | None = None,
+        plan_resolver: PlanResolver | None = None,
         stream: bool = True,
         compact_schemas: bool = True,
     ) -> None:
@@ -678,6 +710,9 @@ class QueryEngine:
         self.session_id = session_id
         self.stream = stream
         self.permission_resolver: Resolver = permission_resolver or auto_deny_resolver
+        # Approve-then-execute plan flow: asks the user to approve a plan before
+        # the model is allowed to make changes (see _plan_gate).
+        self.plan_resolver: PlanResolver = plan_resolver or auto_reject_plan
         self.task_graph = TaskGraph()
         self.background = BackgroundExecutor(tasks=self.task_graph)
         self.teams = TeamRegistry()
@@ -928,6 +963,26 @@ class QueryEngine:
 
             calls, narration = self._extract_calls(msg, content)
 
+            # Plan mode — approve-then-execute gate. The model has either
+            # explicitly signaled it's done planning (exit_plan_mode) or ended
+            # its turn in plan mode with a written plan. Show the plan and ask
+            # the user to approve before ANY change is made.
+            if self.state.plan_mode:
+                explicit = any(c[0] == "exit_plan_mode" for c in calls)
+                if explicit or (not calls and (narration.strip() or steps)):
+                    verdict = yield from self._plan_gate(calls, narration, steps)
+                    if verdict in ("approved", "revise"):
+                        # approved → plan mode off, model implements next loop.
+                        # revise  → feedback injected, model re-plans next loop.
+                        continue
+                    yield Message("done", {  # verdict == "halt": rejected, no feedback
+                        "text": "Plan not approved — still in plan mode. Refine your "
+                                "request, or /plan off to leave plan mode.",
+                        "usage": dict(self._usage),
+                        "session_id": self.session_id,
+                    })
+                    return
+
             if not calls:
                 if narration:
                     yield Message("assistant", {"text": narration})
@@ -1061,6 +1116,90 @@ class QueryEngine:
         name, args, start, end = ext
         narration = (content[:start] + content[end:]).strip()
         return [(name, args, "user")], narration
+
+    def _record_tool_result(self, role: str, name: str, content: str) -> None:
+        """Append a synthetic tool result (and transcript it) so the message
+        history stays well-formed when the engine handles a call itself."""
+        if role == "tool":
+            self.messages.append({"role": "tool", "name": name, "content": content})
+        else:
+            self.messages.append({"role": "user", "content": f"Tool result for {name}:\n{content}"})
+        record_transcript(self.session_id or "", "tool", content, name=name)
+
+    def _plan_gate(self, calls, narration, steps):
+        """Approve-then-execute gate. Renders the plan, asks the user to approve
+        it via self.plan_resolver, applies the decision, and RETURNS a verdict:
+
+            'approved' — plan mode turned off; caller re-loops so the model
+                         makes the actual changes.
+            'revise'   — user gave feedback; caller re-loops so the model
+                         revises the plan (still read-only).
+            'halt'     — user rejected with no feedback; caller ends the turn.
+        """
+        # Choose the plan text to present: prefer the model's prose, then any
+        # <plan> steps, then its last substantive narration.
+        plan_text = (narration or "").strip()
+        if not plan_text and steps:
+            plan_text = "\n".join(f"{i}. {s}" for i, s in enumerate(steps, 1))
+
+        # If the model explicitly called exit_plan_mode, prefer its `plan` arg
+        # and remember the call's role so we can record a tool result for it.
+        explicit_roles: list[str] = []
+        for name, args, role in calls:
+            if name != "exit_plan_mode":
+                continue
+            arg_plan = (args.get("plan") or args.get("content") or "").strip()
+            if arg_plan:
+                plan_text = arg_plan
+            explicit_roles.append(role)
+
+        if not plan_text:
+            plan_text = self._last_assistant_narration()
+        plan_text = (plan_text or "(the model did not provide a written plan)").strip()
+
+        # Make the model's prose visible (renderer no-ops if already streamed).
+        if narration.strip():
+            yield Message("assistant", {"text": narration.strip()})
+        yield Message("plan_review", {"text": plan_text})
+
+        try:
+            approved, feedback = self.plan_resolver(plan_text)
+        except Exception:
+            approved, feedback = False, ""
+        feedback = (feedback or "").strip()
+
+        if approved:
+            self.state.update(plan_mode=False)
+            self.refresh_system_prompt()
+            for role in explicit_roles:
+                self._record_tool_result(
+                    role, "exit_plan_mode",
+                    "OK: plan APPROVED by the user. Plan mode is now OFF — make the changes now.",
+                )
+            self.messages.append({
+                "role": "user",
+                "content": "I approve the plan. Make the changes now — implement it "
+                           "exactly as planned, then briefly confirm what you did.",
+            })
+            yield Message("info", {"text": "plan approved — implementing the changes…"})
+            return "approved"
+
+        # Rejected.
+        for role in explicit_roles:
+            self._record_tool_result(
+                role, "exit_plan_mode",
+                "Plan NOT approved; you are still in PLAN MODE (read-only).",
+            )
+        if feedback:
+            self.messages.append({
+                "role": "user",
+                "content": "Don't implement yet — still planning. Revise the plan based on "
+                           f"this feedback, then present it again for approval: {feedback}",
+            })
+            yield Message("info", {"text": "plan rejected — revising with your feedback"})
+            return "revise"
+        yield Message("warn", {"text": "plan not approved — staying in plan mode (/plan off to leave)"})
+        return "halt"
 
     def _check_loop(self, name: str, args: dict) -> bool:
         key = (name, json.dumps(args, sort_keys=True, default=str))

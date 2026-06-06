@@ -42,7 +42,7 @@ class Agent:
             tools_enabled=tools_enabled,
             effort=effort,
         )
-        from .permissions import terminal_resolver
+        from .permissions import terminal_plan_resolver, terminal_resolver
         self.engine = QueryEngine(
             client=client,
             state=self.state,
@@ -50,6 +50,7 @@ class Agent:
             temperature=temperature,
             config=config,
             permission_resolver=terminal_resolver,
+            plan_resolver=terminal_plan_resolver,
             stream=stream,  # stream tokens live so generation is visible
             compact_schemas=compact_schemas,
         )
@@ -278,6 +279,10 @@ def render_event(event: Message, rs: _RenderState) -> None:
         ui.thinking(d["text"])
     elif k == "plan":
         ui.plan(d["steps"])
+    elif k == "plan_review":
+        # Approve-then-execute: show the plan as a highlighted card. The
+        # interactive approve/reject prompt follows (terminal_plan_resolver).
+        ui.panel(d["text"], title="PLAN — approve to apply", markdown=True)
     elif k == "narration":
         print(ui.color("  ▪ ", ui.TEAL_DIM) + ui.color(d["text"], ui.MUTED))
     elif k == "delta":
