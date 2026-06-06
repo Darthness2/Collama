@@ -25,6 +25,7 @@ _DEFAULTS: dict[str, Any] = {
     "model": None,
     "host": "http://localhost:11434",
     "temperature": 0.2,
+    "effort": "medium",
     "yolo": False,
     "github": {"token": None},
 }

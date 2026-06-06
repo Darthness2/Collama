@@ -51,6 +51,7 @@ When you type `/` in the prompt a popup of available commands appears. If it doe
   "model": "qwen2.5-coder:14b",
   "host": "http://localhost:11434",
   "temperature": 0.2,
+  "effort": "medium",          // low | medium | high — how hard the model works
   "yolo": false,
   "tool_groups": ["core", "search", "tasks", "background",
                   "planning", "notebook", "worktree",
@@ -66,7 +67,7 @@ When you type `/` in the prompt a popup of available commands appears. If it doe
 }
 ```
 
-Almost everything is also toggleable in the REPL: `/model`, `/host`, `/stream on|off`, `/insecure on|off`, `/groups enable github`, `/set temperature 0.5`, etc.
+Almost everything is also toggleable in the REPL: `/model`, `/host`, `/stream on|off`, `/insecure on|off`, `/groups enable github`, `/effort high`, `/set temperature 0.5`, etc.
 
 ## Slash commands
 
@@ -105,6 +106,7 @@ Almost everything is also toggleable in the REPL: `/model`, `/host`, `/stream on
 | | |
 |---|---|
 | `/plan on\|off` | plan mode — read-only, no mutating tools |
+| `/effort [low\|medium\|high]` | show or set how much effort/thoroughness the model applies (bare `/effort` shows the current level) |
 | `/todo`, `/todo add <t>`, `/todo done <n>`, `/todo clear` | session todo list |
 | `/brief [name]` | show stored markdown briefs |
 | `/tasks` | list persistent tasks (survive restarts) |

@@ -19,6 +19,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/teams", "list teams and teammates"),
     ("/tick", "coordinator tick — process mailboxes"),
     ("/plan", "toggle plan mode (read-only)"),
+    ("/effort", "show/set model effort (low|medium|high)"),
     ("/todo", "view or modify the session todo list"),
     ("/brief", "list briefs, or print one"),
     ("/stream", "toggle token streaming on/off"),

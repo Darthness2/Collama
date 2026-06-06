@@ -33,12 +33,14 @@ class Agent:
         config: Optional[dict] = None,
         stream: bool = True,
         compact_schemas: bool = True,
+        effort: str = "medium",
     ) -> None:
         self.state = AppState(
             workspace=root,
             home=Path.home(),
             yolo=yolo,
             tools_enabled=tools_enabled,
+            effort=effort,
         )
         from .permissions import terminal_resolver
         self.engine = QueryEngine(

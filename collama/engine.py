@@ -260,6 +260,52 @@ def _load_claude_md(workspace: Path, home: Path) -> str:
     return "\n\n".join(chunks)
 
 
+# ---------------------------------------------------------------- effort ----
+
+# The effort dial steers how much work the model puts into a turn. Ollama
+# models have no native "reasoning effort" knob, so we steer it through the
+# system prompt — the one lever that reliably changes a local model's
+# thoroughness. Changeable live with /effort; persisted in config.
+EFFORT_LEVELS = ("low", "medium", "high")
+
+_EFFORT_GUIDANCE = {
+    "low": (
+        "Optimize for SPEED and minimalism. Do the smallest amount of work "
+        "that satisfies the request:\n"
+        "- Make the most direct change; don't refactor or polish beyond what "
+        "was asked.\n"
+        "- Investigate only as much as you must — a couple of reads, not a "
+        "survey of the codebase.\n"
+        "- Skip extra verification / test runs unless the user asked for them.\n"
+        "- Keep your final answer to one or two sentences."
+    ),
+    "medium": (
+        "Balance speed and rigor (the default):\n"
+        "- Investigate enough to be confident, then act.\n"
+        "- Verify the change when it's cheap to do so — re-run the failing "
+        "command, or read back the region you edited.\n"
+        "- Keep answers concise but complete."
+    ),
+    "high": (
+        "Optimize for CORRECTNESS and thoroughness. Spend the extra effort:\n"
+        "- Explore the relevant code broadly before editing — understand "
+        "callers, edge cases, and related files, not just the first match.\n"
+        "- Consider failure modes and edge cases; handle errors explicitly.\n"
+        "- After editing, VERIFY: run the relevant command or test and confirm "
+        "it passes, and re-read the changed region to be sure it's correct.\n"
+        "- Prefer a complete, robust fix over a quick patch — but still act, "
+        "then confirm; don't narrate endlessly."
+    ),
+}
+
+
+def _effort_section(effort: str | None) -> str:
+    level = (effort or "medium").lower()
+    if level not in EFFORT_LEVELS:
+        level = "medium"
+    return f"\n\n=== EFFORT LEVEL: {level.upper()} ===\n{_EFFORT_GUIDANCE[level]}\n"
+
+
 # ---------------------------------------------------------------- prompt ----
 
 def fetch_system_prompt_parts(state: AppState) -> str:
@@ -404,6 +450,10 @@ Available: read_file, write_file, edit_file, list_dir, grep, run_bash, set_works
 gh_whoami, gh_list_repos, gh_get_repo, gh_get_file, gh_list_issues, gh_create_issue,
 gh_list_pulls, gh_get_pull, gh_search_code, github_api.
 """
+
+    # Effort dial — steer how much exploration / verification / rigor the
+    # model applies this turn (changeable live with /effort).
+    base += _effort_section(getattr(state, "effort", "medium"))
 
     # s05: KNOWLEDGE ON DEMAND — append CLAUDE.md / .collama.md / AGENTS.md from workspace and parents.
     memory = _load_claude_md(workspace, home)

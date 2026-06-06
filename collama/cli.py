@@ -44,6 +44,7 @@ Slash commands:
   /teams                  list teams and teammates (s09)
   /tick [team] [claim]    coordinator tick — process mailboxes; pass 'claim' to auto-claim tasks (s11)
   /plan on|off            toggle plan mode (read-only, no mutating tools)
+  /effort [low|medium|high]  show or set how much effort/thoroughness the model applies
   /todo [add|done|clear]  view or modify the session todo list
   /brief [name]           list briefs, or print one
   /stream on|off          toggle token streaming (turn off on networks that break chunked streams)
@@ -164,6 +165,14 @@ def _apply_setting_live(agent: Agent, key: str, value) -> bool:
         agent.state.update(tool_groups=set(value))
         agent.engine.refresh_system_prompt()
         return True
+    if key == "effort":
+        from .engine import EFFORT_LEVELS
+        want = str(value).lower()
+        if want not in EFFORT_LEVELS:
+            return False
+        agent.state.update(effort=want)
+        agent.engine.refresh_system_prompt()
+        return True
     return False
 
 
@@ -198,6 +207,10 @@ def _apply_model_presets(cfg: dict, agent: Agent, model: str) -> list[str]:
         agent.state.tool_groups = set(presets["tool_groups"])
         agent.engine.refresh_system_prompt()
         applied.append(f"tool_groups={sorted(agent.state.tool_groups)}")
+    if "effort" in presets:
+        agent.state.effort = str(presets["effort"])
+        agent.engine.refresh_system_prompt()
+        applied.append(f"effort={agent.state.effort}")
     return applied
 
 
@@ -571,6 +584,7 @@ def repl(agent: Agent, cfg: dict) -> int:
                 ui.info(f"tools:    {'native' if agent.tools_enabled else 'text-protocol fallback'}")
                 ui.info(f"groups:   {', '.join(sorted(groups))}")
                 ui.info(f"stream:   {'on' if agent.engine.stream else 'off'}")
+                ui.info(f"effort:   {agent.state.effort}")
                 ui.info(f"num_ctx:  {agent.client.num_ctx}")
                 np_val = agent.client.num_predict
                 ui.info(f"num_predict: {'unlimited' if np_val in (None, -1) else np_val}")
@@ -637,6 +651,23 @@ def repl(agent: Agent, cfg: dict) -> int:
                 else:
                     ui.info("SSL verification re-enabled.")
                 continue
+            if cmd == "effort":
+                from .engine import EFFORT_LEVELS
+                if not arg1:
+                    ui.info(f"effort: {agent.state.effort}  "
+                            f"(levels: {', '.join(EFFORT_LEVELS)} — change with /effort <level>)")
+                    continue
+                want = arg1.lower()
+                if want not in EFFORT_LEVELS:
+                    ui.warn(f"usage: /effort {'|'.join(EFFORT_LEVELS)}")
+                    continue
+                agent.state.update(effort=want)
+                agent.engine.refresh_system_prompt()
+                cfg["effort"] = want
+                config.save(cfg)
+                ui.info(f"effort: {want} (saved) — the model will apply {want} "
+                        f"exploration / verification / rigor. /preset save to lock it for this model.")
+                continue
             if cmd == "model":
                 if not arg1:
                     ui.info(f"current model: {agent.model}")
@@ -672,6 +703,7 @@ def repl(agent: Agent, cfg: dict) -> int:
                         "temperature": agent.engine.temperature,
                         "stream": agent.engine.stream,
                         "compact_schemas": agent.engine.compact_schemas,
+                        "effort": agent.state.effort,
                     }
                     if agent.state.tool_groups is not None:
                         presets["tool_groups"] = sorted(agent.state.tool_groups)
@@ -1039,6 +1071,7 @@ def main(argv: list[str] | None = None) -> int:
         tools_enabled=bool(tools_supported),
         on_tools_disabled=_remember_no_tools,
         stream=bool(config.get_value(cfg, "ollama.stream", True)),
+        effort=str(config.get_value(cfg, "effort", "medium") or "medium"),
     )
     agent.ctx.github_token = config.get_value(cfg, "github.token")
     agent.ctx.insecure_ssl = bool(config.get_value(cfg, "insecure_ssl", False))

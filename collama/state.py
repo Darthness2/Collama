@@ -30,6 +30,11 @@ class AppState:
     insecure_ssl: bool = False          # turn off TLS verify (school MITM)
     tools_enabled: bool = True          # native ollama tool calls vs text-protocol
 
+    # Effort dial — how much effort/thoroughness the model applies. One of
+    # "low" | "medium" | "high". Injected into the system prompt; higher means
+    # more exploration before acting, more verification after, and more rigor.
+    effort: str = "medium"
+
     # per-tool permission cache: name -> "always"|"once"|"never"|None
     permissions: dict[str, str] = field(default_factory=dict)
 
