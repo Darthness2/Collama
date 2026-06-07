@@ -566,6 +566,18 @@ def _default_frames() -> tuple[str, ...]:
 
 _SPIN_FRAMES = _default_frames()
 
+# Collapse any whitespace run (newlines, tabs, multiple spaces) in a spinner
+# label down to a single space, and strip ends. The spinner clears its line
+# each frame with \r\033[2K — which only erases the CURRENT row, so a label
+# containing a newline (e.g. a multi-line shell command summary) leaves the
+# trailing visual rows behind every frame, accumulating as scrollback junk.
+_LABEL_WS_RX = re.compile(r"\s+")
+
+
+def _sanitize_label(label: str) -> str:
+    return _LABEL_WS_RX.sub(" ", label).strip()
+
+
 # Whimsical stand-ins for a bland "thinking…" while the model chews on a
 # prompt. The Spinner rotates through a shuffled copy of these (one every
 # few seconds) so a long wait feels a little more alive — purely cosmetic,
@@ -635,10 +647,14 @@ class Spinner:
         applied as time passes — used by the engine to tell the user WHY
         the agent has been thinking for a while (large prompt, model loading,
         etc.) instead of just sitting on the original label."""
-        self.label = label
+        self.label = _sanitize_label(label)
         self.color_c = color_c
         # Sort ascending so the loop just picks the highest matching tier.
-        self.escalations = sorted(escalations or [], key=lambda x: x[0])
+        # Sanitize each escalation label for the same reason as the main one.
+        self.escalations = sorted(
+            [(t, _sanitize_label(l)) for t, l in (escalations or [])],
+            key=lambda x: x[0],
+        )
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._t0 = 0.0
@@ -647,14 +663,14 @@ class Spinner:
         # within a single spin (time-indexed below, not per-frame) so it reads
         # as words swapping every few seconds rather than flickering.
         self._verbs: list[str] = []
-        if label == THINKING_LABEL:
+        if self.label == THINKING_LABEL:
             self._verbs = random.sample(_THINKING_VERBS, len(_THINKING_VERBS))
 
     def set_label(self, label: str) -> None:
-        self.label = label
+        self.label = _sanitize_label(label)
         self._verbs = (
             random.sample(_THINKING_VERBS, len(_THINKING_VERBS))
-            if label == THINKING_LABEL
+            if self.label == THINKING_LABEL
             else []
         )
 
@@ -896,13 +912,15 @@ def tilde(s: str) -> str:
 def tool_call(name: str, summary: str) -> None:
     head = color("  ▸ ", TEAL_BRIGHT) + color(name, TEAL_BRIGHT)
     if summary:
-        head += color(f"  {tilde(summary)}", MUTED)
+        # Collapse newlines/tabs so a multi-line arg (e.g. a here-doc shell
+        # command) doesn't produce a multi-row ▸ entry in scrollback.
+        head += color(f"  {tilde(_sanitize_label(summary))}", MUTED)
     print(head)
 
 
 def tool_result(summary: str, ok: bool = True) -> None:
     mark = color("    ✓", OK) if ok else color("    ✗", ERR)
-    print(mark + color(f" {tilde(summary)}", MUTED))
+    print(mark + color(f" {tilde(_sanitize_label(summary))}", MUTED))
 
 
 # ---------- banner ----------
