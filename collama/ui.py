@@ -185,12 +185,14 @@ def render_markdown(text: str) -> str:
     out = _MD_BULLET_RX.sub(lambda m: m.group(1) + color("• ", TEAL), out)
 
     # Step markers: '<step 2>' becomes a styled '▸ step 2', '<step 2/4>'
-    # becomes '▸ step 2 of 4'. Wrapped in newlines so they always read as
-    # their own visible line even if the model puts them inline.
+    # becomes '▸ step 2 of 4'. The model emits these on their own line, so we
+    # render them in place — injecting surrounding newlines here would, in the
+    # line-at-a-time streaming renderer, leave a prefix-only line (stray
+    # trailing whitespace) and a blank line around the marker.
     def _step(m: "re.Match[str]") -> str:
         n, total = m.group(1), m.group(2)
         label = f"▸ step {n} of {total}" if total else f"▸ step {n}"
-        return "\n" + color(label, TEAL_BRIGHT + BOLD) + "\n"
+        return color(label, TEAL_BRIGHT + BOLD)
     out = _MD_STEP_RX.sub(_step, out)
 
     # Bold and italic. (Order matters — bold first.)
@@ -854,12 +856,25 @@ def thinking(msg: str) -> None:
 
 
 def plan(items: list[str]) -> None:
-    """Render a numbered plan in a panel."""
+    """Render a numbered plan in a panel.
+
+    Each step is markdown-rendered (so **bold**, `code`, etc. show styled
+    rather than leaking literal asterisks/backticks) and wrapped to the
+    panel's inner width — long steps used to overflow the right border and
+    leave the box ragged. Continuation lines hang-indent under the text.
+    """
     if not items:
         return
-    body = []
+    inner = max(20, width() - 4)  # mirrors panel()'s inner for inner_pad=1
+    body: list[str] = []
     for i, step in enumerate(items, 1):
-        body.append(color(f"  {i:>2}.", TEAL) + " " + color(step, SURFACE))
+        num = f"  {i:>2}. "          # 6 visible columns
+        indent = " " * _vlen(num)
+        rendered = render_markdown(step.strip())
+        wrapped = _wrap_visible(rendered, max(8, inner - _vlen(num))) or [""]
+        for j, seg in enumerate(wrapped):
+            prefix = color(num, TEAL) if j == 0 else indent
+            body.append(prefix + seg)
     panel(body, title="plan", style="thick", color_c=TEAL, title_c=TEAL_BRIGHT)
 
 
