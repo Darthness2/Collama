@@ -748,6 +748,14 @@ class QueryEngine:
         else:
             self.messages.insert(0, {"role": "system", "content": prompt})
 
+    def approx_context_tokens(self) -> int:
+        """Cheap chars/4 estimate of the current context (system + history).
+
+        Used by the bottom status bar to show a live 'ctx ~N' number, and
+        matches the heuristic already used by the compaction pre-check
+        below so the two displays stay consistent."""
+        return sum(len(str(m.get("content") or "")) // 4 for m in self.messages)
+
     def submit_message(self, prompt: str) -> Iterator[Message]:
         """Drive one user-turn through the full pipeline."""
         self._plan_shown_this_turn = False
