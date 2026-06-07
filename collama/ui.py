@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import random
 import re
 import shutil
 import sys
@@ -563,6 +564,38 @@ def _default_frames() -> tuple[str, ...]:
 
 _SPIN_FRAMES = _default_frames()
 
+# Whimsical stand-ins for a bland "thinking…" while the model chews on a
+# prompt. The Spinner rotates through a shuffled copy of these (one every
+# few seconds) so a long wait feels a little more alive — purely cosmetic,
+# and only used when the label is the default "thinking".
+THINKING_LABEL = "thinking"
+_THINKING_VERBS: tuple[str, ...] = (
+    "thinking",
+    "pondering",
+    "cogitating",
+    "ruminating",
+    "musing",
+    "noodling",
+    "percolating",
+    "marinating",
+    "mulling it over",
+    "scheming",
+    "conjuring",
+    "brewing",
+    "tinkering",
+    "deliberating",
+    "contemplating",
+    "wrangling thoughts",
+    "hatching a plan",
+    "connecting the dots",
+    "puzzling",
+    "spelunking",
+    "untangling",
+    "reticulating splines",
+    "consulting the oracle",
+    "vibing",
+)
+
 # Track any live spinner so we can force-stop it before reading user input.
 _active_spinners: list["Spinner"] = []
 
@@ -607,9 +640,26 @@ class Spinner:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._t0 = 0.0
+        # A plain "thinking" spinner gets the fun rotating verbs. Shuffle a
+        # private copy per instance so different runs vary, but keep it stable
+        # within a single spin (time-indexed below, not per-frame) so it reads
+        # as words swapping every few seconds rather than flickering.
+        self._verbs: list[str] = []
+        if label == THINKING_LABEL:
+            self._verbs = random.sample(_THINKING_VERBS, len(_THINKING_VERBS))
 
     def set_label(self, label: str) -> None:
         self.label = label
+        self._verbs = (
+            random.sample(_THINKING_VERBS, len(_THINKING_VERBS))
+            if label == THINKING_LABEL
+            else []
+        )
+
+    def _whimsy_verb(self, elapsed: float) -> str:
+        # New verb every ~3.5s, indexed off elapsed time so every frame in
+        # that window renders the same word (no per-frame flicker).
+        return self._verbs[int(elapsed // 3.5) % len(self._verbs)]
 
     def _current_label(self, elapsed: float) -> str:
         label = self.label
@@ -618,6 +668,11 @@ class Spinner:
                 label = lbl
             else:
                 break
+        # Still on the plain "thinking" label (no escalation has fired yet)?
+        # Swap in a rotating whimsical verb. Escalation messages carry real
+        # diagnostic context, so we leave those untouched.
+        if self._verbs and label == self.label:
+            label = self._whimsy_verb(elapsed)
         return label
 
     def start(self) -> None:
