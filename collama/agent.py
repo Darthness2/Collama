@@ -126,7 +126,19 @@ class Agent:
         try:
             for msg in gen:
                 if msg.kind == "delta":
-                    status.add_output_text(msg.data.get("text") or "")
+                    text = msg.data.get("text") or ""
+                    status.add_output_text(text)
+                    # Pick up <step N/M> markers the model emitted in this
+                    # chunk so the bar's 'step N/M' segment tracks live.
+                    # Last match wins, so multiple markers in one chunk
+                    # (rare) settle on the most recent one.
+                    last_step = None
+                    for m in ui._MD_STEP_RX.finditer(text):
+                        last_step = m
+                    if last_step is not None:
+                        n = int(last_step.group(1))
+                        total = int(last_step.group(2)) if last_step.group(2) else 0
+                        status.set_step(n, total)
                 elif msg.kind == "done":
                     # Refresh the context number once the turn settles —
                     # tool results and the assistant reply have all been

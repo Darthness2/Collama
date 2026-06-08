@@ -892,6 +892,8 @@ class StatusBar:
         self._lock = threading.Lock()
         self._ctx_tokens = 0       # cumulative context size (chars/4)
         self._out_chars = 0        # output chars streamed this turn
+        self._step_cur = 0         # current <step N/M> from the model (0 = unset)
+        self._step_total = 0       # M from <step N/M>; 0 if model used bare <step N>
         self._last_rows = 0
         self._installed = False
 
@@ -902,6 +904,8 @@ class StatusBar:
             self._t0 = time.monotonic()
             self._ctx_tokens = ctx_tokens
             self._out_chars = 0
+            self._step_cur = 0
+            self._step_total = 0
             self._stop.clear()
         size = shutil.get_terminal_size((80, 24))
         rows = max(2, size.lines)
@@ -931,6 +935,12 @@ class StatusBar:
     def set_ctx_tokens(self, n: int) -> None:
         with self._lock:
             self._ctx_tokens = max(0, int(n))
+
+    def set_step(self, current: int, total: int = 0) -> None:
+        """Reflect a <step N/M> the model just emitted in the status row."""
+        with self._lock:
+            self._step_cur = max(0, int(current))
+            self._step_total = max(0, int(total))
 
     def stop(self) -> None:
         if not self._installed:
@@ -977,8 +987,19 @@ class StatusBar:
             elapsed = time.monotonic() - self._t0
             ctx = self._ctx_tokens
             out_tok = self._out_chars // 4   # ~3.7 chars/token for English
+            step_cur = self._step_cur
+            step_total = self._step_total
         timer = _fmt_elapsed(elapsed)
-        parts = [f"⏱ {timer}", f"~{out_tok:,} tok"]
+        parts = [f"⏱ {timer}"]
+        # Step segment slots between the timer and the token count so a
+        # quick glance at the left of the bar tells the user 'which step
+        # are we on'. Hidden entirely until the model emits its first
+        # <step N/M> marker.
+        if step_cur:
+            parts.append(
+                f"step {step_cur}/{step_total}" if step_total else f"step {step_cur}"
+            )
+        parts.append(f"~{out_tok:,} tok")
         if ctx:
             parts.append(f"ctx ~{ctx:,}")
         raw = "  " + "  ·  ".join(parts)
