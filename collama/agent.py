@@ -116,31 +116,16 @@ class Agent:
         far — the process is not killed.
         """
         rs = _RenderState()
-        # Sticky bottom status bar: live elapsed time + rough token tally
-        # (output streamed this turn + cumulative context size). Seeded
-        # with the pre-turn context size; refreshed after each chat round
-        # below so the 'ctx ~N' figure tracks the conversation growing.
-        status = ui.StatusBar()
-        status.start(ctx_tokens=self.engine.approx_context_tokens())
         gen = self.engine.submit_message(user_input)
         try:
             for msg in gen:
-                if msg.kind == "delta":
-                    status.add_output_text(msg.data.get("text") or "")
-                elif msg.kind == "done":
-                    # Refresh the context number once the turn settles —
-                    # tool results and the assistant reply have all been
-                    # appended to engine.messages by now.
-                    status.set_ctx_tokens(self.engine.approx_context_tokens())
                 render_event(msg, rs)
         except KeyboardInterrupt:
             gen.close()
             ui.stop_all_spinners()
-            status.stop()
             print()
             ui.warn("turn interrupted — back to prompt")
         finally:
-            status.stop()
             if self.on_turn_complete:
                 try:
                     self.on_turn_complete(self)
