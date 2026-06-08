@@ -906,11 +906,16 @@ class StatusBar:
         size = shutil.get_terminal_size((80, 24))
         rows = max(2, size.lines)
         self._last_rows = rows
-        # Reserve the bottom row for the status. Cursor is left just
-        # above it so the next write lands inside the scrollable region,
-        # not on the status row itself.
-        sys.stdout.write(f"\033[1;{rows - 1}r")
-        sys.stdout.write(f"\033[{rows - 1};1H")
+        # Reserve the bottom row for status. Wrap the DECSTBM set in
+        # save/restore-cursor because per the xterm spec it moves the
+        # cursor to home (1,1) — without the wrap, streaming would start
+        # from row 1 and leave a giant blank gap between the user's
+        # prompt and the response.
+        sys.stdout.write(
+            "\033[s"                    # save cursor
+            f"\033[1;{rows - 1}r"       # set scroll region
+            "\033[u"                    # restore cursor
+        )
         sys.stdout.flush()
         self._installed = True
         _active_status_bars.append(self)
@@ -936,14 +941,19 @@ class StatusBar:
             self._thread = None
         if self in _active_status_bars:
             _active_status_bars.remove(self)
-        # Reset scroll region, clear the status row, leave the cursor
-        # at the bottom of what was the scrolling area so the next print
-        # starts on a fresh line below the response.
+        # Reset scroll region and clear the status row, then return the
+        # cursor to wherever streaming left it — NOT to row N-1.
+        # Forcing it down would leave a blank gap between a short
+        # response and the next prompt (the visible bug that motivated
+        # this fix).
         size = shutil.get_terminal_size((80, 24))
         rows = max(2, size.lines)
-        sys.stdout.write("\033[r")                       # reset DECSTBM
-        sys.stdout.write(f"\033[{rows};1H\033[2K")       # clear status row
-        sys.stdout.write(f"\033[{max(1, rows - 1)};1H")  # cursor back in body
+        sys.stdout.write(
+            "\033[s"                            # save cursor
+            "\033[r"                            # reset DECSTBM
+            f"\033[{rows};1H\033[2K"            # clear status row
+            "\033[u"                            # restore cursor
+        )
         sys.stdout.flush()
         self._installed = False
 
