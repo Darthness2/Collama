@@ -623,8 +623,12 @@ def stop_all_spinners() -> None:
 
 
 def prepare_for_input() -> None:
-    """Call right before reading user input: stop spinners, show cursor, flush."""
+    """Call right before reading user input: stop spinners and status bar,
+    show cursor, flush. The status bar in particular MUST come down before
+    readline takes over — otherwise its scroll region clashes with the
+    input prompt and the cursor lands on the wrong row."""
     stop_all_spinners()
+    stop_all_status_bars()
     if sys.stdout.isatty():
         sys.stdout.write("\033[?25h")  # show cursor
         sys.stdout.flush()
@@ -642,17 +646,11 @@ class Spinner:
         label: str = "thinking",
         color_c: str = TEAL_BRIGHT,
         escalations: list[tuple[float, str]] | None = None,
-        stats_getter=None,
     ) -> None:
         """`escalations` is an optional list of (after_seconds, label) pairs
         applied as time passes — used by the engine to tell the user WHY
         the agent has been thinking for a while (large prompt, model loading,
-        etc.) instead of just sitting on the original label.
-
-        `stats_getter` is an optional zero-arg callable returning a short
-        string appended to the spinner — used to show live context size,
-        token estimates, etc. next to the timer. Called once per frame
-        from the spinner thread; exceptions are swallowed."""
+        etc.) instead of just sitting on the original label."""
         self.label = _sanitize_label(label)
         self.color_c = color_c
         # Sort ascending so the loop just picks the highest matching tier.
@@ -661,7 +659,6 @@ class Spinner:
             [(t, _sanitize_label(l)) for t, l in (escalations or [])],
             key=lambda x: x[0],
         )
-        self.stats_getter = stats_getter
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._t0 = 0.0
@@ -735,18 +732,11 @@ class Spinner:
             # Whole seconds — a decimal ticking 10×/s is its own kind of
             # visual noise. The braille glyph already signals liveness.
             timer = f"({elapsed:0.0f}s)"
-            stats = ""
-            if self.stats_getter is not None:
-                try:
-                    stats = _sanitize_label(self.stats_getter() or "")
-                except Exception:
-                    stats = ""
             # Build the plain (ANSI-free) line first so we can measure it and
             # hard-truncate to terminal width — a line that wraps would make
             # \r\033[2K only clear the last visual row, scrolling the rest
             # into scrollback every frame.
-            stats_suffix = f"  · {stats}" if stats else ""
-            raw_visible = f"  {frame} {label}…  {timer}{stats_suffix}"
+            raw_visible = f"  {frame} {label}…  {timer}"
             cols = shutil.get_terminal_size((80, 24)).columns
             if len(raw_visible) > cols - 1:
                 styled = color(raw_visible[: max(1, cols - 2)] + "…", MUTED)
@@ -758,7 +748,6 @@ class Spinner:
                     + color(label + "…", MUTED)
                     + "  "
                     + color(timer, SOFT)
-                    + (color(f"  · {stats}", SOFT) if stats else "")
                 )
             sys.stdout.write("\r\033[2K" + styled)
             sys.stdout.flush()
@@ -851,6 +840,175 @@ class SilenceWatchdog:
             sys.stderr.flush()
             with self._lock:
                 self._tier_idx += 1
+
+
+# ---------- sticky status bar (bottom row) ---------------------------------
+
+# Active status bars so prepare_for_input() / Ctrl+C can force-tear-down
+# the scroll region before any input prompt or new top-level output.
+_active_status_bars: list["StatusBar"] = []
+
+
+def _fmt_elapsed(secs: float) -> str:
+    """Compact human-friendly duration: '4.2s', '1m12s', '5m02s'."""
+    if secs < 60:
+        return f"{secs:0.1f}s"
+    m = int(secs // 60)
+    s = int(secs - m * 60)
+    return f"{m}m{s:02d}s"
+
+
+class StatusBar:
+    """Sticky one-line status row pinned to the bottom of the terminal.
+
+    While installed, scrolling is constrained to rows 1..N-1 via DECSTBM
+    (`\\033[1;{N-1}r`), so streaming text and tool output scroll naturally
+    above while the bottom row stays put. The row is repainted on a
+    ~5fps timer and shows elapsed turn time plus a rough token tally
+    (output streamed this turn + cumulative context size).
+
+    Display:
+        ⏱ 4.2s  ·  ~234 tok  ·  ctx ~8,421
+
+    Token counts during streaming are estimates (chars / 4 — the
+    standard ASCII-English approximation), since Ollama only reports
+    the exact eval_count at the end of the response.
+
+    Lifecycle: start() reserves the scroll region; stop() restores the
+    full screen and clears the status row. Resilient to terminal resize
+    (the row count is re-read on each draw and the region updated).
+    Safe to start() on a non-TTY — becomes a no-op.
+
+    Concurrency note: the per-frame render is emitted as a single
+    write() call (save-cursor + position + clear + status + restore)
+    so it cannot interleave with streaming text writes in the middle of
+    a frame. Drawing happens in a background thread on a 0.2s tick.
+    """
+
+    def __init__(self) -> None:
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._t0 = 0.0
+        self._lock = threading.Lock()
+        self._ctx_tokens = 0       # cumulative context size (chars/4)
+        self._out_chars = 0        # output chars streamed this turn
+        self._last_rows = 0
+        self._installed = False
+
+    def start(self, ctx_tokens: int = 0) -> None:
+        if not sys.stdout.isatty() or self._thread is not None:
+            return
+        with self._lock:
+            self._t0 = time.monotonic()
+            self._ctx_tokens = ctx_tokens
+            self._out_chars = 0
+            self._stop.clear()
+        size = shutil.get_terminal_size((80, 24))
+        rows = max(2, size.lines)
+        self._last_rows = rows
+        # Reserve the bottom row for status. Wrap the DECSTBM set in
+        # save/restore-cursor because per the xterm spec it moves the
+        # cursor to home (1,1) — without the wrap, streaming would start
+        # from row 1 and leave a giant blank gap between the user's
+        # prompt and the response.
+        sys.stdout.write(
+            "\033[s"                    # save cursor
+            f"\033[1;{rows - 1}r"       # set scroll region
+            "\033[u"                    # restore cursor
+        )
+        sys.stdout.flush()
+        self._installed = True
+        _active_status_bars.append(self)
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def add_output_text(self, text: str) -> None:
+        if not text:
+            return
+        with self._lock:
+            self._out_chars += len(text)
+
+    def set_ctx_tokens(self, n: int) -> None:
+        with self._lock:
+            self._ctx_tokens = max(0, int(n))
+
+    def stop(self) -> None:
+        if not self._installed:
+            return
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+            self._thread = None
+        if self in _active_status_bars:
+            _active_status_bars.remove(self)
+        # Reset scroll region and clear the status row, then return the
+        # cursor to wherever streaming left it — NOT to row N-1.
+        # Forcing it down would leave a blank gap between a short
+        # response and the next prompt (the visible bug that motivated
+        # this fix).
+        size = shutil.get_terminal_size((80, 24))
+        rows = max(2, size.lines)
+        sys.stdout.write(
+            "\033[s"                            # save cursor
+            "\033[r"                            # reset DECSTBM
+            f"\033[{rows};1H\033[2K"            # clear status row
+            "\033[u"                            # restore cursor
+        )
+        sys.stdout.flush()
+        self._installed = False
+
+    def _run(self) -> None:
+        # First paint right away so the bar shows up without a tick delay.
+        self._draw()
+        while not self._stop.wait(0.2):
+            self._draw()
+
+    def _draw(self) -> None:
+        size = shutil.get_terminal_size((80, 24))
+        rows = max(2, size.lines)
+        cols = max(20, size.columns)
+        # On resize, reset the scroll region so the bottom row stays
+        # reserved against the actual new terminal bounds.
+        resize_seq = ""
+        if rows != self._last_rows:
+            resize_seq = f"\033[1;{rows - 1}r"
+            self._last_rows = rows
+        with self._lock:
+            elapsed = time.monotonic() - self._t0
+            ctx = self._ctx_tokens
+            out_tok = self._out_chars // 4   # ~3.7 chars/token for English
+        timer = _fmt_elapsed(elapsed)
+        parts = [f"⏱ {timer}", f"~{out_tok:,} tok"]
+        if ctx:
+            parts.append(f"ctx ~{ctx:,}")
+        raw = "  " + "  ·  ".join(parts)
+        if len(raw) > cols - 1:
+            raw = raw[: cols - 2] + "…"
+        styled = color(raw, MUTED) if _supports_color() else raw
+        # One write so save→position→clear→write→restore can't be
+        # interleaved by streaming text from the main thread.
+        frame = (
+            resize_seq
+            + "\033[s"                          # save cursor
+            + f"\033[{rows};1H\033[2K"          # to status row, clear
+            + styled
+            + "\033[u"                          # restore cursor
+        )
+        try:
+            sys.stdout.write(frame)
+            sys.stdout.flush()
+        except (OSError, ValueError):
+            # stdout closed — give up silently rather than crashing the
+            # background thread and leaving the scroll region installed.
+            self._stop.set()
+
+
+def stop_all_status_bars() -> None:
+    for b in list(_active_status_bars):
+        try:
+            b.stop()
+        except Exception:
+            pass
 
 
 # ---------- log helpers ----------

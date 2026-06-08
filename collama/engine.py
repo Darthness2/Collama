@@ -843,10 +843,6 @@ class QueryEngine:
                             (30.0, "still thinking — model may not fully fit in VRAM, check /diag"),
                             (60.0, "still thinking — try /new for smaller context, or Ctrl+C to abort"),
                         ],
-                        # Live ctx-size suffix on the spinner so the user sees
-                        # the prompt size they're waiting on — answers the
-                        # 'how big is this' question without a separate row.
-                        stats_getter=lambda: f"ctx ~{self.approx_context_tokens():,}",
                     )
                     spinner.start()
                     # Heartbeat for AFTER the first token has arrived. The
