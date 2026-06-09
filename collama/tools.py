@@ -1192,14 +1192,47 @@ def t_notebook_edit(args: dict, ctx: ToolContext) -> str:
 
 # -------------------------------------------------------------- interaction
 
+# Auto-cancel an ask_user_question after this long when in yolo mode —
+# the user is likely AFK and we don't want to block the agent forever.
+YOLO_QUESTION_TIMEOUT_S = 60.0
+
+
+def _read_line_with_timeout(timeout: float) -> str | None:
+    """Read one line from stdin with a wallclock timeout. Returns None on
+    timeout or EOF, the line (without trailing newline) otherwise.
+
+    POSIX gets a real timeout via select() on stdin. Windows' select can't
+    poll stdin handles, so we fall back to a blocking readline there —
+    losing the timeout but keeping the tool functional rather than crashing
+    on the OSError that bare select would raise."""
+    import sys as _sys
+    try:
+        import select
+        ready, _, _ = select.select([_sys.stdin], [], [], timeout)
+        if not ready:
+            return None
+        line = _sys.stdin.readline()
+        return line.rstrip("\n") if line else None
+    except (ImportError, OSError, ValueError):
+        try:
+            line = _sys.stdin.readline()
+        except EOFError:
+            return None
+        return line.rstrip("\n") if line else None
+
+
 def t_ask_user_question(args: dict, ctx: ToolContext) -> str:
-    """AskUserQuestionTool — pause and ask the user."""
+    """AskUserQuestionTool — pause and ask the user.
+
+    In yolo mode the question is still presented (since the user explicitly
+    asked for that), but auto-cancels after YOLO_QUESTION_TIMEOUT_S of
+    silence so the agent isn't blocked indefinitely on an AFK user. The
+    cancel returns an ERROR result so the model treats it as 'no answer,
+    proceed with best judgment.'"""
     question = args.get("question") or args.get("prompt") or args.get("q")
     if not question:
         return "ERROR: missing argument 'question'"
     options = args.get("options") or []
-    if ctx.yolo:
-        return "ERROR: cannot ask user in yolo mode"
     from . import ui
     # CRITICAL: stop any active spinner before reading input — otherwise the
     # spinner thread keeps redrawing the line and clobbers what the user is
@@ -1213,10 +1246,28 @@ def t_ask_user_question(args: dict, ctx: ToolContext) -> str:
     ui.warn("? " + question)
     for i, opt in enumerate(options, 1):
         print(f"  {i}. {opt}")
-    try:
-        ans = input("  > ").strip()
-    except EOFError:
-        return "ERROR: no tty"
+    if ctx.yolo:
+        ui.warn(f"  (yolo: auto-cancelling in {int(YOLO_QUESTION_TIMEOUT_S)}s of silence)")
+        _sys.stdout.write("  > ")
+        _sys.stdout.flush()
+        ans = _read_line_with_timeout(YOLO_QUESTION_TIMEOUT_S)
+        if ans is None:
+            print()
+            ui.warn(
+                f"question auto-cancelled after {int(YOLO_QUESTION_TIMEOUT_S)}s "
+                "of silence — proceeding without an answer"
+            )
+            return (
+                f"ERROR: question to user auto-cancelled after "
+                f"{int(YOLO_QUESTION_TIMEOUT_S)}s with no response (yolo mode). "
+                "Make your best decision and continue."
+            )
+        ans = ans.strip()
+    else:
+        try:
+            ans = input("  > ").strip()
+        except EOFError:
+            return "ERROR: no tty"
     if options and ans.isdigit():
         idx = int(ans) - 1
         if 0 <= idx < len(options):
