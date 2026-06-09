@@ -646,11 +646,19 @@ class Spinner:
         label: str = "thinking",
         color_c: str = TEAL_BRIGHT,
         escalations: list[tuple[float, str]] | None = None,
+        stats_getter=None,
     ) -> None:
         """`escalations` is an optional list of (after_seconds, label) pairs
         applied as time passes — used by the engine to tell the user WHY
         the agent has been thinking for a while (large prompt, model loading,
-        etc.) instead of just sitting on the original label."""
+        etc.) instead of just sitting on the original label.
+
+        `stats_getter` is an optional zero-arg callable returning a short
+        string appended as a dim suffix next to the timer. Used as the
+        fallback on terminals where the bottom status bar is disabled
+        (Terminal.app) — the spinner becomes the live readout instead.
+        Called once per frame from the spinner thread; exceptions are
+        swallowed."""
         self.label = _sanitize_label(label)
         self.color_c = color_c
         # Sort ascending so the loop just picks the highest matching tier.
@@ -659,6 +667,7 @@ class Spinner:
             [(t, _sanitize_label(l)) for t, l in (escalations or [])],
             key=lambda x: x[0],
         )
+        self.stats_getter = stats_getter
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._t0 = 0.0
@@ -732,11 +741,18 @@ class Spinner:
             # Whole seconds — a decimal ticking 10×/s is its own kind of
             # visual noise. The braille glyph already signals liveness.
             timer = f"({elapsed:0.0f}s)"
+            stats = ""
+            if self.stats_getter is not None:
+                try:
+                    stats = _sanitize_label(self.stats_getter() or "")
+                except Exception:
+                    stats = ""
+            stats_suffix = f"  · {stats}" if stats else ""
             # Build the plain (ANSI-free) line first so we can measure it and
             # hard-truncate to terminal width — a line that wraps would make
             # \r\033[2K only clear the last visual row, scrolling the rest
             # into scrollback every frame.
-            raw_visible = f"  {frame} {label}…  {timer}"
+            raw_visible = f"  {frame} {label}…  {timer}{stats_suffix}"
             cols = shutil.get_terminal_size((80, 24)).columns
             if len(raw_visible) > cols - 1:
                 styled = color(raw_visible[: max(1, cols - 2)] + "…", MUTED)
@@ -748,6 +764,7 @@ class Spinner:
                     + color(label + "…", MUTED)
                     + "  "
                     + color(timer, SOFT)
+                    + (color(f"  · {stats}", SOFT) if stats else "")
                 )
             sys.stdout.write("\r\033[2K" + styled)
             sys.stdout.flush()
@@ -849,6 +866,34 @@ class SilenceWatchdog:
 _active_status_bars: list["StatusBar"] = []
 
 
+def _status_bar_enabled() -> bool:
+    """Should the bottom status bar paint on this terminal?
+
+    macOS Terminal.app's CSI s / CSI u (save/restore cursor) is unreliable
+    across a DECSTBM scroll-region boundary — saves taken inside the region
+    don't survive a jump outside it and back. The bar's save→jump-to-row-N→
+    write→restore dance leaves the cursor at row N, so the concurrent
+    spinner clears the wrong row (visual clash) and post-turn cursor
+    restoration fails (giant blank gap between prompts). No amount of
+    \\033[s/u tweaking fixes it.
+
+    So we auto-disable on Terminal.app and rely on the spinner's stats
+    suffix for live ctx/time during thinking instead. Other terminals
+    (iTerm2, Alacritty, kitty, gnome-terminal, Windows Terminal, etc.)
+    handle the sequence correctly and keep the bar.
+
+    Override via env vars:
+      COLLAMA_STATUS_BAR=on   force enable (even on Terminal.app)
+      COLLAMA_STATUS_BAR=off  force disable everywhere
+    """
+    flag = os.environ.get("COLLAMA_STATUS_BAR", "").lower()
+    if flag in ("on", "1", "true", "yes"):
+        return True
+    if flag in ("off", "0", "false", "no"):
+        return False
+    return os.environ.get("TERM_PROGRAM", "") != "Apple_Terminal"
+
+
 def _fmt_elapsed(secs: float) -> str:
     """Compact human-friendly duration: '4.2s', '1m12s', '5m02s'."""
     if secs < 60:
@@ -899,6 +944,13 @@ class StatusBar:
 
     def start(self, ctx_tokens: int = 0) -> None:
         if not sys.stdout.isatty() or self._thread is not None:
+            return
+        # Skip entirely on terminals where DECSTBM + cursor save/restore
+        # is unreliable (currently: macOS Terminal.app). agent.turn keeps
+        # calling add_output_text / set_step / set_ctx_tokens / stop on us
+        # — those are all no-ops when _installed stays False, so no caller
+        # changes are needed.
+        if not _status_bar_enabled():
             return
         with self._lock:
             self._t0 = time.monotonic()

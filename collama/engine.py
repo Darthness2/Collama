@@ -843,6 +843,13 @@ class QueryEngine:
                             (30.0, "still thinking — model may not fully fit in VRAM, check /diag"),
                             (60.0, "still thinking — try /new for smaller context, or Ctrl+C to abort"),
                         ],
+                        # Live ctx suffix is the fallback live readout on
+                        # terminals where the bottom bar is disabled
+                        # (Terminal.app). On terminals with the bar it's
+                        # mild duplication while thinking, but the bar
+                        # disappears the moment streaming starts so the
+                        # spinner suffix isn't visible long.
+                        stats_getter=lambda: f"ctx ~{self.approx_context_tokens():,}",
                     )
                     spinner.start()
                     # Heartbeat for AFTER the first token has arrived. The
