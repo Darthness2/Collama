@@ -723,9 +723,11 @@ class Spinner:
         self._thread = None
         if self in _active_spinners:
             _active_spinners.remove(self)
-        # Clear the spinner line.
-        sys.stdout.write("\r\033[2K")
-        sys.stdout.flush()
+        # Clear the spinner line (shared lock so the clear can't fall
+        # between a status-bar save and its restore).
+        with _STDOUT_LOCK:
+            sys.stdout.write("\r\033[2K")
+            sys.stdout.flush()
 
     def _run(self) -> None:
         # 150ms grace period — if the work finishes fast (most tool dispatches
@@ -766,8 +768,15 @@ class Spinner:
                     + color(timer, SOFT)
                     + (color(f"  · {stats}", SOFT) if stats else "")
                 )
-            sys.stdout.write("\r\033[2K" + styled)
-            sys.stdout.flush()
+            # Share _STDOUT_LOCK with the status bar so a spinner frame
+            # and a bar frame can't byte-interleave. The bar's save-cursor
+            # captures wherever the spinner left it; if a spinner write
+            # slipped in mid-bar-frame, the save would catch a stale
+            # position and the restore would put the cursor on the wrong
+            # row — which on macOS Terminal.app produced the visible clash.
+            with _STDOUT_LOCK:
+                sys.stdout.write("\r\033[2K" + styled)
+                sys.stdout.flush()
             i += 1
             # ~8 fps — quick enough to read as alive, slow enough to be calm.
             self._stop.wait(0.12)
@@ -867,31 +876,27 @@ _active_status_bars: list["StatusBar"] = []
 
 
 def _status_bar_enabled() -> bool:
-    """Should the bottom status bar paint on this terminal?
+    """Should the bottom status bar paint?
 
-    macOS Terminal.app's CSI s / CSI u (save/restore cursor) is unreliable
-    across a DECSTBM scroll-region boundary — saves taken inside the region
-    don't survive a jump outside it and back. The bar's save→jump-to-row-N→
-    write→restore dance leaves the cursor at row N, so the concurrent
-    spinner clears the wrong row (visual clash) and post-turn cursor
-    restoration fails (giant blank gap between prompts). No amount of
-    \\033[s/u tweaking fixes it.
-
-    So we auto-disable on Terminal.app and rely on the spinner's stats
-    suffix for live ctx/time during thinking instead. Other terminals
-    (iTerm2, Alacritty, kitty, gnome-terminal, Windows Terminal, etc.)
-    handle the sequence correctly and keep the bar.
-
-    Override via env vars:
-      COLLAMA_STATUS_BAR=on   force enable (even on Terminal.app)
-      COLLAMA_STATUS_BAR=off  force disable everywhere
-    """
+    Default ON everywhere. Set COLLAMA_STATUS_BAR=off to fully disable
+    (no scroll region, no bottom row reservation) for terminals where
+    the live bar isn't wanted."""
     flag = os.environ.get("COLLAMA_STATUS_BAR", "").lower()
-    if flag in ("on", "1", "true", "yes"):
-        return True
     if flag in ("off", "0", "false", "no"):
         return False
-    return os.environ.get("TERM_PROGRAM", "") != "Apple_Terminal"
+    return True
+
+
+# Serializes stdout writes from the spinner thread and the status-bar
+# thread. Python's BufferedWriter already locks individual write() calls,
+# but a multi-step paint (save → position → clear → write → restore) is
+# only safe against another thread's frame at the FLUSH boundary — we
+# acquire this lock around (write + flush) in both renderers so frames
+# can't byte-interleave. Half-interleavings can strand the cursor at the
+# wrong row, which on macOS Terminal.app manifests as the spinner
+# clobbering the status row (the 'thinking-verb clash') and post-turn
+# cursor stranding (the 'blank rows between prompts').
+_STDOUT_LOCK = threading.Lock()
 
 
 def _fmt_elapsed(secs: float) -> str:
@@ -945,11 +950,6 @@ class StatusBar:
     def start(self, ctx_tokens: int = 0) -> None:
         if not sys.stdout.isatty() or self._thread is not None:
             return
-        # Skip entirely on terminals where DECSTBM + cursor save/restore
-        # is unreliable (currently: macOS Terminal.app). agent.turn keeps
-        # calling add_output_text / set_step / set_ctx_tokens / stop on us
-        # — those are all no-ops when _installed stays False, so no caller
-        # changes are needed.
         if not _status_bar_enabled():
             return
         with self._lock:
@@ -962,17 +962,26 @@ class StatusBar:
         size = shutil.get_terminal_size((80, 24))
         rows = max(2, size.lines)
         self._last_rows = rows
-        # Reserve the bottom row for status. Wrap the DECSTBM set in
-        # save/restore-cursor because per the xterm spec it moves the
-        # cursor to home (1,1) — without the wrap, streaming would start
-        # from row 1 and leave a giant blank gap between the user's
-        # prompt and the response.
-        sys.stdout.write(
-            "\033[s"                    # save cursor
-            f"\033[1;{rows - 1}r"       # set scroll region
-            "\033[u"                    # restore cursor
-        )
-        sys.stdout.flush()
+        # Reserve the bottom row for status. DECSTBM (`\033[1;Nr`) moves
+        # the cursor to home (1,1) per the xterm spec — without bracketing
+        # save/restore the streaming response would start at row 1 and
+        # leave a giant blank gap between the prompt and the answer.
+        #
+        # We use DEC ESC 7/8 (`\033 7` / `\033 8`) rather than the CSI
+        # aliases `\033[s` / `\033[u` because macOS Terminal.app's CSI
+        # variant doesn't reliably round-trip the cursor across a DECSTBM
+        # boundary — that mismatch is exactly what produced the
+        # 'thinking-verb clash' and the blank-rows-between-prompts. The
+        # DEC originals hit Terminal.app's VT100 save/restore code path,
+        # which round-trips correctly; on xterm/iTerm2/etc. they're
+        # equivalent to CSI s/u so other terminals are unaffected.
+        with _STDOUT_LOCK:
+            sys.stdout.write(
+                "\0337"                       # DECSC — save cursor
+                f"\033[1;{rows - 1}r"         # DECSTBM — set scroll region
+                "\0338"                       # DECRC — restore cursor
+            )
+            sys.stdout.flush()
         self._installed = True
         _active_status_bars.append(self)
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -1010,13 +1019,15 @@ class StatusBar:
         # this fix).
         size = shutil.get_terminal_size((80, 24))
         rows = max(2, size.lines)
-        sys.stdout.write(
-            "\033[s"                            # save cursor
-            "\033[r"                            # reset DECSTBM
-            f"\033[{rows};1H\033[2K"            # clear status row
-            "\033[u"                            # restore cursor
-        )
-        sys.stdout.flush()
+        # DEC ESC 7/8 for the same Terminal.app round-trip reason as start().
+        with _STDOUT_LOCK:
+            sys.stdout.write(
+                "\0337"                             # DECSC — save cursor
+                "\033[r"                            # reset DECSTBM
+                f"\033[{rows};1H\033[2K"            # clear status row
+                "\0338"                             # DECRC — restore cursor
+            )
+            sys.stdout.flush()
         self._installed = False
 
     def _run(self) -> None:
@@ -1058,18 +1069,21 @@ class StatusBar:
         if len(raw) > cols - 1:
             raw = raw[: cols - 2] + "…"
         styled = color(raw, MUTED) if _supports_color() else raw
-        # One write so save→position→clear→write→restore can't be
-        # interleaved by streaming text from the main thread.
+        # One composed write so the save→position→clear→status→restore
+        # sequence can't be byte-interleaved with another thread's frame.
+        # DEC ESC 7/8 instead of CSI s/u for the Terminal.app reason
+        # documented in start().
         frame = (
             resize_seq
-            + "\033[s"                          # save cursor
+            + "\0337"                           # DECSC — save cursor
             + f"\033[{rows};1H\033[2K"          # to status row, clear
             + styled
-            + "\033[u"                          # restore cursor
+            + "\0338"                           # DECRC — restore cursor
         )
         try:
-            sys.stdout.write(frame)
-            sys.stdout.flush()
+            with _STDOUT_LOCK:
+                sys.stdout.write(frame)
+                sys.stdout.flush()
         except (OSError, ValueError):
             # stdout closed — give up silently rather than crashing the
             # background thread and leaving the scroll region installed.
