@@ -674,7 +674,7 @@ def t_set_workspace(args: dict, ctx: ToolContext) -> str:
     return f"OK: workspace set to {ctx.root}"
 
 
-# -------------------------------------------------------------- s12 worktree
+# -------------------------------------------------------------- worktree
 
 def t_enter_worktree(args: dict, ctx: ToolContext) -> str:
     path = args["path"]
@@ -710,7 +710,7 @@ def t_exit_worktree(args: dict, ctx: ToolContext) -> str:
     return f"OK: exited worktree, back to {prev}"
 
 
-# -------------------------------------------------------------- s07 tasks
+# -------------------------------------------------------------- tasks
 
 def _tasks(ctx: ToolContext):
     return getattr(ctx, "tasks", None)
@@ -771,7 +771,7 @@ def t_task_delete(args: dict, ctx: ToolContext) -> str:
     return "OK: deleted" if tg.delete(args["id"]) else f"ERROR: no task {args['id']}"
 
 
-# -------------------------------------------------------------- s08 background
+# -------------------------------------------------------------- background
 
 def t_bash_async(args: dict, ctx: ToolContext) -> str:
     bg = getattr(ctx, "background", None)
@@ -809,7 +809,7 @@ def t_task_wait(args: dict, ctx: ToolContext) -> str:
     return _truncate(f"{job.id} finished {job.status}\n\n{job.result}")
 
 
-# -------------------------------------------------------------- s04 sub-agent
+# -------------------------------------------------------------- sub-agent
 
 def t_agent_call(args: dict, ctx: ToolContext) -> str:
     """Fork a sub-agent on a fresh messages[]; return its final answer."""
@@ -840,7 +840,7 @@ def t_agent_call_async(args: dict, ctx: ToolContext) -> str:
     return f"OK: dream {job_id} dispatched (will surface on completion)"
 
 
-# -------------------------------------------------------------- s09 teams
+# -------------------------------------------------------------- teams
 
 def _teams(ctx: ToolContext):
     return getattr(ctx, "teams", None)
@@ -913,7 +913,7 @@ def t_teammate_list(args: dict, ctx: ToolContext) -> str:
     return "\n".join(m.short() for m in members)
 
 
-# -------------------------------------------------------------- s10 protocols
+# -------------------------------------------------------------- protocols
 
 def t_send_message(args: dict, ctx: ToolContext) -> str:
     """SendMessageTool — request/response across teammates via mailboxes."""
@@ -947,7 +947,7 @@ def t_inbox(args: dict, ctx: ToolContext) -> str:
     return "\n".join(out)
 
 
-# -------------------------------------------------------------- s11 coordinator
+# -------------------------------------------------------------- coordinator
 
 def t_coordinator_tick(args: dict, ctx: ToolContext) -> str:
     engine = getattr(ctx, "engine", None)
@@ -1076,7 +1076,7 @@ def t_web_fetch(args: dict, ctx: ToolContext) -> str:
         return "ERROR: url must be http:// or https://"
     timeout = int(args.get("timeout", 20))
     max_bytes = int(args.get("max_bytes", 200_000))
-    headers = {"User-Agent": "collama/0.1 (+https://github.com/Darthness2/Collama)"}
+    headers = {"User-Agent": "collama/0.1 (+https://github.com/YOUR_USERNAME/Collama)"}
     try:
         r = requests.get(url, timeout=timeout, headers=headers,
                          verify=not ctx.insecure_ssl, stream=True)
@@ -1827,33 +1827,33 @@ TOOLS: dict[str, ToolFn] = {
     "grep": t_grep,
     "run_bash": t_run_bash,
     "set_workspace": t_set_workspace,
-    # s12 worktree
+    # worktree
     "enter_worktree": t_enter_worktree,
     "exit_worktree": t_exit_worktree,
-    # s07 tasks
+    # tasks
     "task_create": t_task_create,
     "task_update": t_task_update,
     "task_get": t_task_get,
     "task_list": t_task_list,
     "task_delete": t_task_delete,
-    # s08 background
+    # background
     "bash_async": t_bash_async,
     "task_status": t_task_status,
     "task_wait": t_task_wait,
-    # s04 sub-agent
+    # sub-agent
     "agent_call": t_agent_call,
     "agent_call_async": t_agent_call_async,
-    # s09 teams
+    # teams
     "team_create": t_team_create,
     "team_delete": t_team_delete,
     "team_list": t_team_list,
     "teammate_create": t_teammate_create,
     "teammate_delete": t_teammate_delete,
     "teammate_list": t_teammate_list,
-    # s10 protocols
+    # protocols
     "send_message": t_send_message,
     "inbox": t_inbox,
-    # s11 coordinator
+    # coordinator
     "coordinator_tick": t_coordinator_tick,
     "coordinator_run": t_coordinator_run,
     # extended tools
@@ -2042,7 +2042,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             },
         },
     },
-    # ---------- s12: worktrees ----------
+    # ---------- worktrees ----------
     {"type": "function", "function": {
         "name": "enter_worktree",
         "description": "Push the current workspace onto a stack and switch to `path`. Use when working on a sub-task in its own directory. Pair with exit_worktree.",
@@ -2057,7 +2057,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "parameters": {"type": "object", "properties": {}},
     }},
 
-    # ---------- s07: persistent task graph ----------
+    # ---------- persistent task graph ----------
     {"type": "function", "function": {
         "name": "task_create",
         "description": "Create a persistent task with status tracking and optional dependencies. Returns the new task id (e.g. t9f3e2c1).",
@@ -2101,7 +2101,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "parameters": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
     }},
 
-    # ---------- s08: background ----------
+    # ---------- background ----------
     {"type": "function", "function": {
         "name": "bash_async",
         "description": "Run a shell command IN THE BACKGROUND. Returns a job id immediately; the result will be auto-injected on completion. Use task_status / task_wait to check sooner.",
@@ -2124,7 +2124,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         }, "required": ["task_id"]},
     }},
 
-    # ---------- s04: sub-agents ----------
+    # ---------- sub-agents ----------
     {"type": "function", "function": {
         "name": "agent_call",
         "description": "Fork a sub-agent on a FRESH conversation to handle a focused subtask (e.g. 'find every file that imports requests and summarize'). Returns the sub-agent's final answer. Inherits workspace, github_token, etc., but its messages are isolated so the main context stays clean.",
@@ -2143,7 +2143,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         }, "required": ["prompt"]},
     }},
 
-    # ---------- s09 teams ----------
+    # ---------- teams ----------
     {"type": "function", "function": {
         "name": "team_create",
         "description": "Create a persistent team (a directory of long-lived teammate personas).",
@@ -2182,7 +2182,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "parameters": {"type": "object", "properties": {"team": {"type": "string"}}},
     }},
 
-    # ---------- s10 protocols ----------
+    # ---------- protocols ----------
     {"type": "function", "function": {
         "name": "send_message",
         "description": "Send a message to a teammate's inbox (request-response protocol). Recipient processes mail next coordinator_tick / coordinator_run.",
@@ -2202,7 +2202,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         }, "required": ["team", "name"]},
     }},
 
-    # ---------- s11 coordinator ----------
+    # ---------- coordinator ----------
     {"type": "function", "function": {
         "name": "coordinator_tick",
         "description": "One coordinator tick: process every teammate's mailbox by spawning a sub-agent. With auto_claim=true, idle teammates also pick up matching pending tasks from the task graph.",

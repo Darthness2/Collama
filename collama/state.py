@@ -44,7 +44,7 @@ class AppState:
     # worktree stack — entered worktree dirs we'll pop back to.
     worktree_stack: list[str] = field(default_factory=list)
 
-    # Plan mode (s03 reinforced): when on, the agent must produce a plan and
+    # Plan mode: when on, the agent must produce a plan and
     # NOT call mutating tools — read-only inspection only.
     plan_mode: bool = False
 

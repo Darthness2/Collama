@@ -1,2 +1,0 @@
-pygame
-# Add other dependencies here (e.g., numpy, etc.)

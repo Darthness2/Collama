@@ -38,11 +38,11 @@ Slash commands:
   /tools-on               force native tool calls for this model (saves)
   /tools-off              force text-protocol tool fallback for this model (saves)
   /cd [path]              show or change the workspace directory
-  /tasks                  list persistent tasks (s07)
-  /jobs                   list background jobs (s08)
-  /wt                     show worktree stack (s12)
-  /teams                  list teams and teammates (s09)
-  /tick [team] [claim]    coordinator tick — process mailboxes; pass 'claim' to auto-claim tasks (s11)
+  /tasks                  list persistent tasks
+  /jobs                   list background jobs
+  /wt                     show worktree stack
+  /teams                  list teams and teammates
+  /tick [team] [claim]    coordinator tick — process mailboxes; pass 'claim' to auto-claim tasks
   /plan on|off            toggle plan mode: model proposes a plan you approve before it makes changes
   /effort [low|medium|high]  show or set how much effort/thoroughness the model applies
   /todo [add|done|clear]  view or modify the session todo list

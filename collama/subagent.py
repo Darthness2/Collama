@@ -1,4 +1,4 @@
-"""s04 — Sub-agents (forkSubagent).
+"""Sub-agents (forkSubagent).
 
 Forks a child QueryEngine with a FRESH messages[] but inherited state
 (workspace, github_token, yolo, …). The child runs an isolated turn —

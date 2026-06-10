@@ -5,15 +5,49 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "collama"
 version = "0.1.0"
-description = "A Claude Code / Codex-style terminal coding agent powered by Ollama."
+description = "A Claude Code / Codex-style terminal coding agent powered by Ollama. Runs entirely on your machine."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-authors = [{ name = "Collama" }]
+authors = [{ name = "Collama Contributors" }]
+keywords = ["ollama", "llm", "agent", "cli", "coding-assistant", "local-llm", "mcp"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+    "Topic :: Software Development :: Code Generators",
+    "Topic :: Terminals",
+    "Topic :: Utilities",
+]
 dependencies = [
     "requests>=2.31",
     "prompt_toolkit>=3.0",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "build>=1.0",
+    "coverage>=7.0",
+    "ruff>=0.5",
+    "twine>=6.0",
+]
+
+[project.urls]
+Homepage      = "https://github.com/YOUR_USERNAME/Collama"
+Repository    = "https://github.com/YOUR_USERNAME/Collama"
+Issues        = "https://github.com/YOUR_USERNAME/Collama/issues"
+Changelog     = "https://github.com/YOUR_USERNAME/Collama/blob/main/CHANGELOG.md"
 
 [project.scripts]
 collama = "collama.cli:main"

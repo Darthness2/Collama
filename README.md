@@ -17,18 +17,19 @@ Collama gives a local LLM tools to read, edit, and create files; run shell comma
 ## Install
 
 ```bash
-git clone https://github.com/Darthness2/Collama.git ~/Collama
-cd ~/Collama
-pip install -e .
+pip install collama          # PyPI
+# or
+pipx install collama         # isolated, recommended on macOS / Linux distros with PEP 668
 ```
 
-If `pip install` errors on macOS with *externally-managed-environment*:
+From source, for hacking on Collama itself:
 ```bash
-pip install -e . --user        # easiest
-# or
-brew install pipx && pipx install -e .
-# or use a venv
+git clone https://github.com/YOUR_USERNAME/Collama.git ~/Collama
+cd ~/Collama
+pip install -e ".[dev]"      # adds build, coverage, ruff
 ```
+
+If `pip install` errors on macOS with *externally-managed-environment*, use `pipx` above, or a venv.
 
 ## Quickstart
 
@@ -128,7 +129,7 @@ Sending all ~60 tools every request is a heavy prompt-eval cost on a local model
 
 **On by default:** `core` (read/write/edit/list/grep/bash/set_workspace), `search` (glob/web_fetch/web_search), `tasks` (task graph + todo + brief), `background`, `planning`, `notebook`, `worktree`, `interaction`, `system`.
 
-**Off by default** (enable with `/groups enable <name>`): `github`, `teams`, `subagent`, `stubs` (mcp/lsp/tungsten placeholders).
+**Off by default** (enable with `/groups enable <name>`): `github`, `teams`, `subagent`, `mcp` (see below).
 
 ```
 /groups                        # show what's on
@@ -174,6 +175,34 @@ Generate a fine-grained PAT at <https://github.com/settings/tokens>, then:
 ```
 
 Token is stored chmod-600 in the config file. `GITHUB_TOKEN` / `GH_TOKEN` env vars also work. Tools available once enabled: `gh_whoami`, `gh_list_repos`, `gh_get_repo`, `gh_get_file`, `gh_list_issues`, `gh_create_issue`, `gh_list_pulls`, `gh_get_pull`, `gh_search_code`, plus a raw `github_api` escape hatch. Mutating calls always ask for approval.
+
+## MCP servers
+
+Collama speaks [Model Context Protocol](https://modelcontextprotocol.io). Drop any number of MCP servers in `~/.config/collama/mcp.json` and their tools join the regular tool catalog — namespaced as `mcp__<server>__<tool>` so two servers can expose the same name without colliding.
+
+```json
+{
+  "servers": {
+    "everything": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-everything"]
+    },
+    "github": {
+      "command": "uvx",
+      "args": ["mcp-server-github"],
+      "env": {"GITHUB_TOKEN": "${GITHUB_TOKEN}"}
+    }
+  }
+}
+```
+
+Then turn the group on:
+
+```
+/groups enable mcp
+```
+
+Servers spawn lazily on first use (the schemas are fetched via `tools/list` at startup) and are torn down on exit. `mcp_servers` lists what's configured and which tools each one exposes; `mcp_restart <name>` bounces one without restarting Collama.
 
 ## Hardware tips
 

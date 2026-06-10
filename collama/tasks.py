@@ -1,11 +1,11 @@
-"""s07 — Persistent task graph + task IDs.
+"""Persistent task graph + task IDs.
 
 Tasks are JSON files at ~/.config/collama/tasks/<id>.json. The model calls
 task_create / task_update / task_get / task_list / task_delete tools to
 maintain a persistent record of what it's working on, including
 dependencies and status.
 
-s12 — Each task can carry a `worktree` (directory). enter_worktree pushes
+Each task can carry a `worktree` (directory). enter_worktree pushes
 the current workspace onto a stack and switches to that dir; exit_worktree
 pops back. The worktree is bound by task id when created via task_create
 with worktree=<path>.

@@ -1,4 +1,4 @@
-"""s08 — Background tasks.
+"""Background tasks.
 
 A small daemon-thread executor that runs slow ops (shell commands, sub-agent
 queries) without blocking the agent's main loop. Each submission returns a

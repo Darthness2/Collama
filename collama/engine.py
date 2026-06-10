@@ -243,7 +243,7 @@ def _summarize_args(name: str, args: dict) -> str:
     return ""
 
 
-# ---------------------------------------------------------------- s05: memory ---
+# ---------------------------------------------------------------- memory ---
 
 def _load_claude_md(workspace: Path, home: Path) -> str:
     """Lazily collect CLAUDE.md / .collama.md memory files from workspace and parents."""
@@ -486,7 +486,7 @@ anything now. Only after the user approves will plan mode turn off and let you
 make the actual changes. If the user rejects the plan, revise it (still
 read-only) and present it again."""
 
-    # s05: KNOWLEDGE ON DEMAND — append CLAUDE.md / .collama.md / AGENTS.md from workspace and parents.
+    # KNOWLEDGE ON DEMAND — append CLAUDE.md / .collama.md / AGENTS.md from workspace and parents.
     memory = _load_claude_md(workspace, home)
     if memory:
         base += "\n\n=== PROJECT MEMORY (from CLAUDE.md / AGENTS.md / .collama.md) ===\n" + memory

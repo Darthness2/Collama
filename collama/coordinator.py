@@ -1,11 +1,11 @@
-"""s11 — Autonomous Agents (Coordinator).
+"""Autonomous Agents (Coordinator).
 
 The Coordinator drives long-lived teammates: when ticked, every teammate
 with non-empty mailbox is processed by spawning a sub-agent with that
 teammate's role + accumulated mail as the prompt. Replies land in the
 teammate's transcript and (optionally) are surfaced as parent
 notifications. With auto_claim=True, idle teammates also pick up
-matching pending tasks from the TaskGraph (s07) and execute them.
+matching pending tasks from the TaskGraph and execute them.
 
 Implemented as a synchronous tick — the parent calls Coordinator.tick()
 or the model calls coordinator_tick() through a tool. Background mode is

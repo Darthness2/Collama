@@ -1,4 +1,4 @@
-"""s09 — Agent Teams.
+"""Agent Teams.
 
 A *team* is a directory of long-lived *teammate* personas. Each teammate
 has an id, a role (system-prompt addendum), a mailbox (pending messages
@@ -32,7 +32,7 @@ class Teammate:
     team: str
     name: str
     role: str = ""                     # system-prompt addendum
-    skills: list[str] = field(default_factory=list)  # advisory tags for s11 auto-claim
+    skills: list[str] = field(default_factory=list)  # advisory tags for coordinator auto-claim
     mailbox: list[dict] = field(default_factory=list)
     transcript: list[dict] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
