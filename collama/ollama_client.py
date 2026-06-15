@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Iterator
 
 import requests
+
+log = logging.getLogger(__name__)
 
 
 def _is_apple_silicon() -> bool:
@@ -189,6 +192,9 @@ class OllamaClient:
                 return []
             return r.json().get("models", []) or []
         except (requests.RequestException, ValueError):
+            # Best-effort: /api/ps may be unreachable. Log at debug-ish level
+            # so an always-failing probe is diagnosable without spamming.
+            log.warning("could not query loaded models from /api/ps", exc_info=True)
             return []
 
     def model_vram_status(self, name: str) -> dict | None:
@@ -228,6 +234,8 @@ class OllamaClient:
             )
             return r.status_code == 200
         except requests.RequestException:
+            # Best-effort unload on shutdown; log rather than swallow silently.
+            log.warning("failed to unload model %s from Ollama", model, exc_info=True)
             return False
 
     def chat(

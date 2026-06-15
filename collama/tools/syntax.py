@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import subprocess
 
-from .base import _resolve, _truncate, ToolContext
+from .base import _resolve_contained, _truncate, ToolContext
 
 
 _SYNTAX_EXT_LANG = {
@@ -230,7 +230,7 @@ def t_check_syntax(args: dict, ctx: ToolContext) -> str:
     any_fail = False
     for raw in paths:
         try:
-            p = _resolve(raw, ctx.root)
+            p = _resolve_contained(raw, ctx.root)
         except Exception as e:
             lines.append(f"FAIL  {raw}  resolve error: {e}")
             any_fail = True

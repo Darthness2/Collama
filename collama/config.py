@@ -75,8 +75,8 @@ def save(cfg: dict) -> None:
     # can't leave a torn file. A module-level lock serializes concurrent saves.
     with _save_lock:
         fd, tmp_name = tempfile.mkstemp(dir=str(d), prefix="config.", suffix=".json.tmp")
+        os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)  # 0o600 before any data lands
         try:
-            os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)  # 0o600 before any data lands
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(payload)
                 f.flush()

@@ -7,6 +7,7 @@ REPL also does, just inlined here for backwards compatibility.
 """
 from __future__ import annotations
 
+import logging
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +18,8 @@ from .engine import Message, QueryEngine
 from .ollama_client import OllamaClient
 from .state import AppState
 from .tools import ToolContext  # re-exported so existing imports keep working
+
+log = logging.getLogger(__name__)
 
 
 class Agent:
@@ -64,7 +67,9 @@ class Agent:
                     try:
                         on_tools_disabled(self)
                     except Exception:
-                        pass
+                        # User callback must not crash the state-change loop,
+                        # but log so a broken callback isn't swallowed silently.
+                        log.warning("on_tools_disabled callback raised", exc_info=True)
             self.state.subscribe(_watch)
 
     # --- legacy-shaped properties ---
@@ -157,7 +162,8 @@ class Agent:
                 try:
                     self.on_turn_complete(self)
                 except Exception:
-                    pass
+                    # User callback must not break turn teardown, but log it.
+                    log.warning("on_turn_complete callback raised", exc_info=True)
         return rs.final_text
 
     def stream(self, user_input: str) -> Iterator[Message]:

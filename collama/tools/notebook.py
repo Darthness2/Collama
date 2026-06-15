@@ -1,7 +1,7 @@
 """notebook_edit — get/insert/replace/delete cells in a Jupyter .ipynb."""
 from __future__ import annotations
 
-from .base import ToolContext, _resolve, _truncate
+from .base import PathEscapeError, ToolContext, _resolve_contained, _truncate
 
 
 def t_notebook_edit(args: dict, ctx: ToolContext) -> str:
@@ -12,7 +12,10 @@ def t_notebook_edit(args: dict, ctx: ToolContext) -> str:
     cell_index = args.get("cell_index")
     new_source = args.get("source", "")
     cell_type = args.get("cell_type", "code")  # code | markdown | raw
-    p = _resolve(path, ctx.root)
+    try:
+        p = _resolve_contained(path, ctx.root)
+    except PathEscapeError as exc:
+        return exc.message
     if not p.exists():
         if op == "insert" and not cell_index:
             p.parent.mkdir(parents=True, exist_ok=True)

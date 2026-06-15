@@ -7,11 +7,14 @@ mid-turn still leaves a usable history.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Any
 
 from ..config import config_dir
+
+_log = logging.getLogger(__name__)
 
 
 def transcripts_dir() -> Path:
@@ -37,5 +40,7 @@ def record(session_id: str, role: str, content: Any, **extra) -> None:
     try:
         with p.open("a", encoding="utf-8") as f:
             f.write(json.dumps(line, ensure_ascii=False) + "\n")
-    except OSError:
-        pass
+    except OSError as e:
+        # Transcript is best-effort history; a write failure shouldn't abort
+        # the turn, but it shouldn't vanish silently either.
+        _log.warning("transcript write failed for %s: %s", p, e, exc_info=True)

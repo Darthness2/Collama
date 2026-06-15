@@ -1,9 +1,23 @@
 """config_get / config_set / sleep / skill / powershell — misc system tools."""
 from __future__ import annotations
 
+import logging
 import subprocess
 
 from .base import ToolContext, _analyze_failure, _truncate
+
+logger = logging.getLogger(__name__)
+
+# Keys the model is permitted to write via config_set. Deliberately EXCLUDES
+# security-sensitive keys: `yolo` (would disable every approval prompt),
+# `github.token` (a secret credential), and anything not listed here. The user
+# can still set those by hand in the config file or via CLI flags.
+_CONFIG_SET_ALLOWLIST = frozenset({
+    "model",
+    "host",
+    "temperature",
+    "effort",
+})
 
 
 def t_config_get(args: dict, ctx: ToolContext) -> str:
@@ -26,6 +40,13 @@ def t_config_set(args: dict, ctx: ToolContext) -> str:
     from ..config import set_value, save
     key = args["key"]
     val = args["value"]
+    if key not in _CONFIG_SET_ALLOWLIST:
+        allowed = ", ".join(sorted(_CONFIG_SET_ALLOWLIST))
+        return (
+            f"ERROR: config_set refuses key '{key}'. Only these keys may be set "
+            f"via this tool: {allowed}. Security-sensitive keys (yolo, "
+            f"github.token) must be changed by the user directly."
+        )
     if not ctx.confirm("config set", f"{key} = {val}"):
         return "ERROR: user denied"
     set_value(engine.config, key, val)

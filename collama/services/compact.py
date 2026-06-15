@@ -215,6 +215,10 @@ def auto_compact(
         try:
             summary_text = summarize_with_model(middle)
         except Exception:
+            # Deliberate fallback to the deterministic bulletize summary, but
+            # log it — a silently-failing LLM summarizer would otherwise be
+            # invisible and degrade summary quality with no signal.
+            log.warning("LLM summarizer failed; falling back to bulletize", exc_info=True)
             summary_text = None
     if not summary_text:
         summary_text = _bulletize(middle)
@@ -249,13 +253,18 @@ def manage_context(
 ) -> list[CompactReport]:
     """Run the three strategies in order: snip → collapse → auto."""
     reports: list[CompactReport] = []
+    # Capture the REAL token count before each mutation rather than fabricating
+    # `before` from `after + count * constant` — the old form reported a made-up
+    # number that drifted from the actual saving.
+    before_snip = _approx_tokens(messages)
     snipped = snip_compact(messages)
     if snipped:
-        reports.append(CompactReport(True, _approx_tokens(messages) + snipped * 50,
+        reports.append(CompactReport(True, before_snip,
                                      _approx_tokens(messages), "snipCompact"))
+    before_collapse = _approx_tokens(messages)
     merged = context_collapse(messages)
     if merged:
-        reports.append(CompactReport(True, _approx_tokens(messages) + merged * 100,
+        reports.append(CompactReport(True, before_collapse,
                                      _approx_tokens(messages), "contextCollapse"))
     r = auto_compact(
         messages,
