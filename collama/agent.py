@@ -278,15 +278,16 @@ def _end_stream_line(rs: _RenderState) -> None:
         if rs.md is not None:
             rs.md.flush()  # type: ignore[attr-defined]
             rs.streamed_visible = bool(getattr(rs.md, "visible_emitted", False))
-        sys.stdout.write("\n")
-        sys.stdout.flush()
+        ui.sync_write("\n")
         rs.streaming = False
         rs.md = None
 
 
 def _stream_emit(s: str) -> None:
-    sys.stdout.write(s)
-    sys.stdout.flush()
+    # Share the paint lock with the status bar / spinner so a background
+    # paint frame can't slip between this write and its flush and clobber
+    # the cursor mid-token.
+    ui.sync_write(s)
 
 
 def render_event(event: Message, rs: _RenderState) -> None:
@@ -372,8 +373,7 @@ def render_event(event: Message, rs: _RenderState) -> None:
                 # Continue the run: bump counts, rewrite the line in place.
                 rs.run_count += 1
                 rs.run_fail += 0 if ok else 1
-                sys.stdout.write("\033[A\r\033[2K" + _run_line(rs) + "\n")
-                sys.stdout.flush()
+                ui.sync_write("\033[A\r\033[2K" + _run_line(rs) + "\n")
             else:
                 # Start a fresh run (also the non-TTY path: one line per call).
                 _finalize_run(rs)
@@ -395,8 +395,7 @@ def render_event(event: Message, rs: _RenderState) -> None:
                 rs.run_fail += 0 if ok else 1
                 rs.run_adds += adds
                 rs.run_dels += dels
-                sys.stdout.write("\033[A\r\033[2K" + _edit_run_line(rs) + "\n")
-                sys.stdout.flush()
+                ui.sync_write("\033[A\r\033[2K" + _edit_run_line(rs) + "\n")
             else:
                 _finalize_run(rs)
                 rs.run_cat = "edit"

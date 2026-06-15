@@ -899,6 +899,21 @@ def _status_bar_enabled() -> bool:
 _STDOUT_LOCK = threading.Lock()
 
 
+def sync_write(s: str) -> None:
+    """Write `s` to stdout under the shared paint lock, then flush.
+
+    The Spinner and StatusBar paint from background threads, bracketing each
+    frame in a cursor save/restore. Main-thread output that streams tokens or
+    moves the cursor must take the SAME lock — otherwise a paint frame can
+    land between the write and its flush and the two fight over the cursor,
+    so the model's text visibly writes over itself. Plain prints elsewhere
+    are cursor-neutral against a paint frame and don't need this.
+    """
+    with _STDOUT_LOCK:
+        sys.stdout.write(s)
+        sys.stdout.flush()
+
+
 def _fmt_elapsed(secs: float) -> str:
     """Compact human-friendly duration: '4.2s', '1m12s', '5m02s'."""
     if secs < 60:
@@ -1073,9 +1088,13 @@ class StatusBar:
         # sequence can't be byte-interleaved with another thread's frame.
         # DEC ESC 7/8 instead of CSI s/u for the Terminal.app reason
         # documented in start().
+        # resize_seq (DECSTBM) homes the cursor, so it MUST go INSIDE the
+        # save/restore bracket — placing it before the save (the old bug) let
+        # a resize strand the cursor at (1,1), and the next streamed tokens
+        # wrote over the top of the screen.
         frame = (
-            resize_seq
-            + "\0337"                           # DECSC — save cursor
+            "\0337"                             # DECSC — save cursor
+            + resize_seq                        # re-reserve bottom row on resize
             + f"\033[{rows};1H\033[2K"          # to status row, clear
             + styled
             + "\0338"                           # DECRC — restore cursor

@@ -20,6 +20,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tags matching `v*` using PyPI Trusted Publishing.
 - `LICENSE` (MIT) and this `CHANGELOG.md`.
 
+### Fixed
+- Streamed output no longer writes over the screen. The bottom status bar's
+  scroll-region escape (DECSTBM) homes the cursor to the top-left; on a
+  terminal resize the re-reservation ran *before* the cursor save, stranding
+  the cursor at home so the next tokens overwrote the banner and prior
+  output. The resize escape is now emitted inside the save/restore bracket.
+  Streaming and in-place tool-line writes also share the paint lock now, so a
+  background status-bar/spinner frame can't slip between a write and its flush
+  and fight over the cursor.
+
 ### Changed
 - `collama/tools.py` (2521 lines) split into a `collama/tools/` package
   with one module per tool group. Public API is unchanged — every existing
