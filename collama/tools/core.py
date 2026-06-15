@@ -4,6 +4,7 @@ runs through these; everything else is sugar on top.
 """
 from __future__ import annotations
 
+import logging
 import re
 import subprocess
 from pathlib import Path
@@ -12,19 +13,26 @@ from .. import diff as _diff
 from .. import ui
 from .base import (
     MAX_OUTPUT_CHARS,
+    PathEscapeError,
     ToolContext,
     _analyze_failure,
     _record_edit,
     _resolve,
+    _resolve_contained,
     _truncate,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def t_read_file(args: dict, ctx: ToolContext) -> str:
     path = args["path"]
     start = int(args.get("start_line", 1))
     end = args.get("end_line")
-    p = _resolve(path, ctx.root)
+    try:
+        p = _resolve_contained(path, ctx.root)
+    except PathEscapeError as exc:
+        return exc.message
     if not p.exists():
         return f"ERROR: file not found: {path}"
     if not p.is_file():
@@ -51,7 +59,8 @@ def t_read_file(args: dict, ctx: ToolContext) -> str:
 
     try:
         text = p.read_text(errors="replace")
-    except Exception as e:
+    except OSError as e:
+        logger.warning("read_file failed for %s", p, exc_info=True)
         return f"ERROR: {e}"
     lines = text.splitlines()
     s = max(1, start) - 1
@@ -76,7 +85,10 @@ def t_write_file(args: dict, ctx: ToolContext) -> str:
         return "ERROR: missing argument 'content'"
     if not isinstance(content, str):
         return f"ERROR: 'content' must be a string, got {type(content).__name__}"
-    p = _resolve(path, ctx.root)
+    try:
+        p = _resolve_contained(path, ctx.root)
+    except PathEscapeError as exc:
+        return exc.message
     existed = p.exists()
     old_text = p.read_text(errors="replace") if existed else ""
     # SAFETY: refuse to silently empty an existing non-empty file. Small
@@ -204,7 +216,10 @@ def t_edit_file(args: dict, ctx: ToolContext) -> str:
     old = args["old_string"]
     new = args["new_string"]
     replace_all = bool(args.get("replace_all", False))
-    p = _resolve(path, ctx.root)
+    try:
+        p = _resolve_contained(path, ctx.root)
+    except PathEscapeError as exc:
+        return exc.message
     if not p.exists():
         return f"ERROR: file not found: {path}"
     raw = _read_text_robust(p)
@@ -381,7 +396,10 @@ def t_multi_edit(args: dict, ctx: ToolContext) -> str:
     edits = args.get("edits") or []
     if not isinstance(edits, list) or not edits:
         return "ERROR: 'edits' must be a non-empty list of {old_string, new_string} objects."
-    p = _resolve(path, ctx.root)
+    try:
+        p = _resolve_contained(path, ctx.root)
+    except PathEscapeError as exc:
+        return exc.message
     if not p.exists():
         return f"ERROR: file not found: {path}"
     raw = _read_text_robust(p)
@@ -436,7 +454,10 @@ def t_replace_lines(args: dict, ctx: ToolContext) -> str:
     new_content = args.get("new_content", "")
     if start is None or end is None:
         return "ERROR: replace_lines requires start_line and end_line (1-indexed, inclusive)"
-    p = _resolve(path, ctx.root)
+    try:
+        p = _resolve_contained(path, ctx.root)
+    except PathEscapeError as exc:
+        return exc.message
     if not p.exists():
         return f"ERROR: file not found: {path}"
     raw = _read_text_robust(p)
@@ -471,7 +492,10 @@ def t_replace_lines(args: dict, ctx: ToolContext) -> str:
 
 def t_list_dir(args: dict, ctx: ToolContext) -> str:
     path = args.get("path", ".")
-    p = _resolve(path, ctx.root).resolve()
+    try:
+        p = _resolve_contained(path, ctx.root)
+    except PathEscapeError as exc:
+        return exc.message
     if not p.exists():
         return f"ERROR: not found: {path}"
     if not p.is_dir():

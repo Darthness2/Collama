@@ -42,6 +42,7 @@ Implements the Claude-Code-style data flow:
 from __future__ import annotations
 
 import json
+import logging
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -67,6 +68,8 @@ from .tasks import TaskGraph, TaskKind, new_id
 from .teams import TeamRegistry
 from .tools import ToolContext, all_tool_schemas, dispatch
 
+
+log = logging.getLogger(__name__)
 
 MAX_TOOL_ITERATIONS = 1000
 LOOP_THRESHOLD = 4  # tightened from 2 — at 2 a single retry tripped it,

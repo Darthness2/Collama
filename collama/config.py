@@ -6,10 +6,19 @@ File is chmod 600 since it can hold a GitHub PAT.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import stat
+import tempfile
+import threading
 from pathlib import Path
 from typing import Any
+
+_log = logging.getLogger(__name__)
+
+# Serializes config writes within this process so two concurrent saves can't
+# race on the temp-file / os.replace dance and lose or corrupt a write.
+_save_lock = threading.Lock()
 
 
 def config_dir() -> Path:
@@ -47,7 +56,8 @@ def load() -> dict:
         return dict(_DEFAULTS)
     try:
         data = json.loads(p.read_text())
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError) as e:
+        _log.warning("config load failed, using defaults: %s", e, exc_info=True)
         return dict(_DEFAULTS)
     if not isinstance(data, dict):
         return dict(_DEFAULTS)
@@ -58,13 +68,27 @@ def save(cfg: dict) -> None:
     d = config_dir()
     d.mkdir(parents=True, exist_ok=True)
     p = config_path()
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(cfg, indent=2))
-    tmp.replace(p)
-    try:
-        os.chmod(p, stat.S_IRUSR | stat.S_IWUSR)
-    except OSError:
-        pass
+    payload = json.dumps(cfg, indent=2)
+    # Create the temp file in the same dir with a UNIQUE name and 0o600 perms
+    # BEFORE writing, so secrets (e.g. a GitHub PAT) are never world-readable
+    # even for a brief window. fsync before the atomic os.replace so a crash
+    # can't leave a torn file. A module-level lock serializes concurrent saves.
+    with _save_lock:
+        fd, tmp_name = tempfile.mkstemp(dir=str(d), prefix="config.", suffix=".json.tmp")
+        try:
+            os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)  # 0o600 before any data lands
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_name, p)
+        except OSError as e:
+            _log.warning("config save failed: %s", e, exc_info=True)
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
 
 
 def set_value(cfg: dict, dotted_key: str, value: Any) -> dict:
