@@ -12,6 +12,7 @@ Two kinds of background work:
 """
 from __future__ import annotations
 
+import logging
 import subprocess
 import threading
 import time
@@ -20,6 +21,14 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .tasks import TaskGraph, TaskKind, new_id
+
+logger = logging.getLogger(__name__)
+
+# Cap on concurrently-running background jobs. Without a bound, an LLM that
+# fires off bash_async / agent_call_async in a loop spawns unbounded threads
+# (and subprocesses), exhausting the host. Submissions beyond this block until
+# a slot frees up.
+MAX_CONCURRENT_JOBS = 8
 
 
 @dataclass
@@ -31,33 +40,44 @@ class BackgroundJob:
     result: str = ""
     started_at: float = field(default_factory=time.time)
     finished_at: float = 0.0
+    # Concrete id of the persistent TaskGraph row this job created (if any), so
+    # _finish can update the right task by id instead of fuzzy-matching on the
+    # command/description string.
+    task_id: str | None = None
 
 
 class BackgroundExecutor:
-    def __init__(self, tasks: TaskGraph | None = None) -> None:
+    def __init__(self, tasks: TaskGraph | None = None,
+                 max_concurrent: int = MAX_CONCURRENT_JOBS) -> None:
         self.tasks = tasks
         self._jobs: dict[str, BackgroundJob] = {}
         self._notifications: list[dict] = []
         self._lock = threading.Lock()
         self._threads: list[threading.Thread] = []
+        # Bound concurrent in-flight jobs. Acquired by the worker thread, not
+        # the submitter, so submit_* returns immediately; the worker releases
+        # it in a finally so a crash can't leak a permit.
+        self._slots = threading.BoundedSemaphore(max(1, int(max_concurrent)))
 
     # -- public ----------------------------------------------------------
 
     def submit_bash(self, command: str, cwd: Path, *, timeout: int = 600) -> str:
         job_id = new_id(TaskKind.BASH)
         job = BackgroundJob(id=job_id, kind="bash", label=command)
-        with self._lock:
-            self._jobs[job_id] = job
         if self.tasks is not None:
-            self.tasks.create(
+            task = self.tasks.create(
                 title=f"bash: {command[:60]}",
                 kind=TaskKind.BASH, status="active",
                 description=command, worktree=str(cwd),
             )
+            job.task_id = task.id
+        with self._lock:
+            self._jobs[job_id] = job
         t = threading.Thread(
             target=self._run_bash, args=(job_id, command, cwd, timeout), daemon=True,
         )
         t.start()
+        self._reap_threads()
         self._threads.append(t)
         return job_id
 
@@ -72,8 +92,14 @@ class BackgroundExecutor:
             target=self._run_dream, args=(job_id, prompt, run), daemon=True,
         )
         t.start()
+        self._reap_threads()
         self._threads.append(t)
         return job_id
+
+    def _reap_threads(self) -> None:
+        """Drop references to finished threads so the list can't grow without
+        bound over a long session."""
+        self._threads = [t for t in self._threads if t.is_alive()]
 
     def status(self, job_id: str) -> Optional[BackgroundJob]:
         with self._lock:
@@ -108,19 +134,23 @@ class BackgroundExecutor:
             job.status = status
             job.result = result
             job.finished_at = time.time()
+            task_id = job.task_id
             self._notifications.append({
                 "id": job_id, "kind": job.kind, "label": job.label,
                 "status": status, "result": result[:2000],
             })
-        if self.tasks is not None:
-            t = self.tasks.list()  # crude lookup; bash jobs are recent
-            for task in t:
-                if task.kind == "b" and task.description == job.label and task.status == "active":
-                    self.tasks.update(task.id, status="done" if status == "done" else "failed",
-                                      result=result[:2000])
-                    break
+        # Update the persistent task by its concrete id — never by matching the
+        # command/description string (two jobs can share a command, and a
+        # string match can hit the wrong row).
+        if self.tasks is not None and task_id is not None:
+            self.tasks.update(
+                task_id,
+                status="done" if status == "done" else "failed",
+                result=result[:2000],
+            )
 
     def _run_bash(self, job_id: str, command: str, cwd: Path, timeout: int) -> None:
+        self._slots.acquire()
         try:
             proc = subprocess.run(
                 command, shell=True, cwd=str(cwd),
@@ -137,11 +167,18 @@ class BackgroundExecutor:
         except subprocess.TimeoutExpired:
             self._finish(job_id, "failed", f"timed out after {timeout}s")
         except Exception as e:
+            logger.warning("background bash job %s failed", job_id, exc_info=True)
             self._finish(job_id, "failed", f"{type(e).__name__}: {e}")
+        finally:
+            self._slots.release()
 
     def _run_dream(self, job_id: str, prompt: str, run: Callable[[str], str]) -> None:
+        self._slots.acquire()
         try:
             text = run(prompt) or ""
             self._finish(job_id, "done", text)
         except Exception as e:
+            logger.warning("background dream job %s failed", job_id, exc_info=True)
             self._finish(job_id, "failed", f"{type(e).__name__}: {e}")
+        finally:
+            self._slots.release()

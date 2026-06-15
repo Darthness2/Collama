@@ -4,6 +4,7 @@ runs through these; everything else is sugar on top.
 """
 from __future__ import annotations
 
+import logging
 import re
 import subprocess
 from pathlib import Path
@@ -12,19 +13,26 @@ from .. import diff as _diff
 from .. import ui
 from .base import (
     MAX_OUTPUT_CHARS,
+    PathEscapeError,
     ToolContext,
     _analyze_failure,
     _record_edit,
     _resolve,
+    _resolve_contained,
     _truncate,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def t_read_file(args: dict, ctx: ToolContext) -> str:
     path = args["path"]
     start = int(args.get("start_line", 1))
     end = args.get("end_line")
-    p = _resolve(path, ctx.root)
+    try:
+        p = _resolve_contained(path, ctx.root)
+    except PathEscapeError as exc:
+        return exc.message
     if not p.exists():
         return f"ERROR: file not found: {path}"
     if not p.is_file():
@@ -51,7 +59,8 @@ def t_read_file(args: dict, ctx: ToolContext) -> str:
 
     try:
         text = p.read_text(errors="replace")
-    except Exception as e:
+    except OSError as e:
+        logger.warning("read_file failed for %s", p, exc_info=True)
         return f"ERROR: {e}"
     lines = text.splitlines()
     s = max(1, start) - 1
@@ -76,7 +85,10 @@ def t_write_file(args: dict, ctx: ToolContext) -> str:
         return "ERROR: missing argument 'content'"
     if not isinstance(content, str):
         return f"ERROR: 'content' must be a string, got {type(content).__name__}"
-    p = _resolve(path, ctx.root)
+    try:
+        p = _resolve_contained(path, ctx.root)
+    except PathEscapeError as exc:
+        return exc.message
     existed = p.exists()
     old_text = p.read_text(errors="replace") if existed else ""
     # SAFETY: refuse to silently empty an existing non-empty file. Small
@@ -204,7 +216,10 @@ def t_edit_file(args: dict, ctx: ToolContext) -> str:
     old = args["old_string"]
     new = args["new_string"]
     replace_all = bool(args.get("replace_all", False))
-    p = _resolve(path, ctx.root)
+    try:
+        p = _resolve_contained(path, ctx.root)
+    except PathEscapeError as exc:
+        return exc.message
     if not p.exists():
         return f"ERROR: file not found: {path}"
     raw = _read_text_robust(p)
@@ -229,47 +244,25 @@ def t_edit_file(args: dict, ctx: ToolContext) -> str:
     if count > 1:
         return f"ERROR: old_string matches {count} times — pass replace_all=true or supply more context"
 
-    # 2. Recovery: normalize line endings + tolerate trailing-whitespace drift.
+    # 2. Recovery: tolerate line-ending and trailing-whitespace drift ONLY.
+    # We match against an EOL-normalized copy but preserve the file's original
+    # line endings per-line on write (see _splice_preserving_eol) instead of
+    # flattening the whole file to LF. We do NOT do indent-insensitive / fully
+    # whitespace-stripped fuzzy matching — that can silently land on the wrong
+    # region and corrupt the file.
     text = _norm_eol(raw)
     old_n = _norm_eol(old)
     new_n = _norm_eol(new)
+    crlf = "\r\n" in raw
     if text.count(old_n) == 1:
         if not ctx.confirm("file edit", f"{path}: replace 1 occurrence (line-ending normalized)"):
             return "ERROR: user denied edit"
         new_text = text.replace(old_n, new_n, 1)
+        if crlf:
+            new_text = new_text.replace("\n", "\r\n")
     else:
         span = _fuzzy_span(text, old_n)
         if span is None:
-            # Last-resort recovery: indent-insensitive line match. Re-indents
-            # the replacement to match the file's actual indentation so we
-            # don't break Python / YAML scoping.
-            ii = _indent_insensitive_span(text, old_n)
-            if ii is not None:
-                i, j, file_indent, old_indent = ii
-                if not ctx.confirm("file edit", f"{path}: replace lines {i + 1}-{j} (indent-tolerant match)"):
-                    return "ERROR: user denied edit"
-                file_lines = text.split("\n")
-                new_split = new_n.split("\n")
-                # Re-base every replacement line: strip the old common indent,
-                # add the file's indent. Blank lines stay blank.
-                rebased = []
-                for ln in new_split:
-                    if not ln.strip():
-                        rebased.append("")
-                        continue
-                    if old_indent and ln.startswith(old_indent):
-                        ln = ln[len(old_indent):]
-                    rebased.append(file_indent + ln)
-                new_text = "\n".join(file_lines[:i] + rebased + file_lines[j:])
-                if raw.strip() and not new_text.strip() and not args.get("allow_empty"):
-                    return (
-                        f"ERROR: refusing to empty {path}. The replacement would leave the "
-                        f"file with no content. If that's intentional, pass allow_empty=true."
-                    )
-                p.write_text(new_text, encoding="utf-8")
-                _record_edit(ctx, p, raw, new_text, "edit")
-                adds, dels = _diff.stats(text, new_text)
-                return f"OK: edited {path} +{adds} -{dels} (indent-recovered)"
             lines = len(text.splitlines())
             # Count consecutive failures on this path this turn — after the
             # second one, escalate hard: keep retrying edit_file won't work,
@@ -314,6 +307,8 @@ def t_edit_file(args: dict, ctx: ToolContext) -> str:
             return "ERROR: user denied edit"
         file_lines = text.split("\n")
         new_text = "\n".join(file_lines[:i] + new_n.split("\n") + file_lines[j:])
+        if crlf:
+            new_text = new_text.replace("\n", "\r\n")
 
     # SAFETY: refuse to silently empty a non-empty file (catches both the
     # exact-match and fuzzy-match branches).
@@ -356,20 +351,9 @@ def _resolve_edit(
         lines = t.split("\n")
         return "\n".join(lines[:i] + n.split("\n") + lines[j:]), "whitespace-tolerant"
 
-    ii = _indent_insensitive_span(t, o)
-    if ii is not None:
-        i, j, file_indent, old_indent = ii
-        lines = t.split("\n")
-        rebased = []
-        for ln in n.split("\n"):
-            if not ln.strip():
-                rebased.append("")
-                continue
-            if old_indent and ln.startswith(old_indent):
-                ln = ln[len(old_indent):]
-            rebased.append(file_indent + ln)
-        return "\n".join(lines[:i] + rebased + lines[j:]), "indent-recovered"
-
+    # NOTE: indent-insensitive (fully-whitespace-stripped) matching is
+    # intentionally NOT attempted — it can silently replace the wrong region.
+    # Callers should fall back to replace_lines for that case.
     return None, "old_string not found"
 
 
@@ -381,7 +365,10 @@ def t_multi_edit(args: dict, ctx: ToolContext) -> str:
     edits = args.get("edits") or []
     if not isinstance(edits, list) or not edits:
         return "ERROR: 'edits' must be a non-empty list of {old_string, new_string} objects."
-    p = _resolve(path, ctx.root)
+    try:
+        p = _resolve_contained(path, ctx.root)
+    except PathEscapeError as exc:
+        return exc.message
     if not p.exists():
         return f"ERROR: file not found: {path}"
     raw = _read_text_robust(p)
@@ -407,6 +394,12 @@ def t_multi_edit(args: dict, ctx: ToolContext) -> str:
             )
         text = new_text
         notes.append(f"#{idx}:{note}")
+
+    # If any edit took an EOL-normalizing recovery path it flattened the file
+    # to LF. Restore the file's original CRLF endings per-line so a single
+    # whitespace-tolerant edit doesn't rewrite every line ending in the file.
+    if ("\r\n" in raw) and any(not n.endswith(":exact") for n in notes):
+        text = text.replace("\r\n", "\n").replace("\n", "\r\n")
 
     if text == raw:
         return f"OK: no-op — all {len(edits)} edits left {path} unchanged."
@@ -436,7 +429,10 @@ def t_replace_lines(args: dict, ctx: ToolContext) -> str:
     new_content = args.get("new_content", "")
     if start is None or end is None:
         return "ERROR: replace_lines requires start_line and end_line (1-indexed, inclusive)"
-    p = _resolve(path, ctx.root)
+    try:
+        p = _resolve_contained(path, ctx.root)
+    except PathEscapeError as exc:
+        return exc.message
     if not p.exists():
         return f"ERROR: file not found: {path}"
     raw = _read_text_robust(p)
@@ -449,11 +445,18 @@ def t_replace_lines(args: dict, ctx: ToolContext) -> str:
         return f"ERROR: end_line ({end}) must be >= start_line ({start})"
     if not ctx.confirm("file edit (replace_lines)", f"{path}: lines {s + 1}-{e}"):
         return "ERROR: user denied edit"
-    # Preserve the file's original line ending if possible.
-    eol = "\r\n" if (raw and "\r\n" in raw and "\n" in raw and raw.count("\r\n") >= raw.count("\n") / 2) else "\n"
-    new_chunk = new_content
-    if not new_chunk.endswith(("\n", "\r")):
-        new_chunk += eol
+    # Preserve the file's line ending per-line. Use CRLF only when the file is
+    # genuinely CRLF (no lone-LF lines), so we never force CRLF onto an LF file
+    # or leave the inserted region with a different style than its neighbours.
+    lf_lines = raw.count("\n") - raw.count("\r\n")
+    eol = "\r\n" if (raw.count("\r\n") > 0 and lf_lines == 0) else "\n"
+    # Re-base the model-supplied content (which usually arrives as LF) onto the
+    # file's actual EOL, line by line, instead of only fixing the final one.
+    body_lines = new_content.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    had_trailing_nl = new_content.endswith(("\n", "\r"))
+    if had_trailing_nl and body_lines and body_lines[-1] == "":
+        body_lines = body_lines[:-1]
+    new_chunk = eol.join(body_lines) + eol
     # Splice
     new_lines = lines[:s] + [new_chunk] + lines[e:]
     new_text = "".join(new_lines)
@@ -471,7 +474,10 @@ def t_replace_lines(args: dict, ctx: ToolContext) -> str:
 
 def t_list_dir(args: dict, ctx: ToolContext) -> str:
     path = args.get("path", ".")
-    p = _resolve(path, ctx.root).resolve()
+    try:
+        p = _resolve_contained(path, ctx.root)
+    except PathEscapeError as exc:
+        return exc.message
     if not p.exists():
         return f"ERROR: not found: {path}"
     if not p.is_dir():
@@ -488,18 +494,9 @@ def t_list_dir(args: dict, ctx: ToolContext) -> str:
         rows.append(f"  {kind}  {size:>9}  {entry.name}")
     header = f"{path}  ({len(rows)} entries)"
     body = "\n".join(rows) if rows else "(empty or only dotfiles)"
-    hint = ""
-    try:
-        outside = (p != ctx.root) and (ctx.root not in p.parents) and (p not in ctx.root.parents)
-    except Exception:
-        outside = False
-    if outside:
-        hint = (
-            f"\n\nNOTE: this directory ({p}) is OUTSIDE the current workspace ({ctx.root}). "
-            f"To read or edit files inside it with relative paths, first call "
-            f"set_workspace with path={p}. Otherwise use absolute paths like {p}/<file>."
-        )
-    return _truncate(f"{header}\n{body}{hint}")
+    # Path containment guarantees `p` is inside the workspace, so there is no
+    # longer an out-of-workspace case to warn about here.
+    return _truncate(f"{header}\n{body}")
 
 
 def t_grep(args: dict, ctx: ToolContext) -> str:
@@ -508,7 +505,10 @@ def t_grep(args: dict, ctx: ToolContext) -> str:
         return "ERROR: missing argument 'pattern'"
     path = args.get("path", ".")
     case_insensitive = bool(args.get("case_insensitive", False))
-    p = _resolve(path, ctx.root)
+    try:
+        p = _resolve_contained(path, ctx.root)
+    except PathEscapeError as exc:
+        return exc.message
 
     # Refuse absurdly broad targets — a grep across the user's whole home dir
     # eats minutes and floods the context with irrelevant matches (e.g. node

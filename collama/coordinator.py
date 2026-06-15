@@ -13,6 +13,7 @@ just `BackgroundExecutor.submit_dream(prompt, run=tick_callable)`.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -22,6 +23,8 @@ from .teams import TeamRegistry, Teammate
 
 if TYPE_CHECKING:  # pragma: no cover
     from .engine import QueryEngine
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -66,57 +69,71 @@ def tick(
         if tm.busy:
             continue
 
-        # Optionally claim a task to add to mailbox.
-        claimed_id: str | None = None
-        if auto_claim and not tm.mailbox:
-            claimed_id = _claim_one_task(tasks, tm)
-            if claimed_id:
-                t = tasks.get(claimed_id)
-                if t:
-                    registry.deliver(
-                        tm.team, tm.id, sender="coordinator",
-                        kind="task",
-                        content=f"[claimed task {t.id}]\n{t.title}\n\n{t.description}",
-                    )
-                    tm = registry.get_teammate(tm.team, tm.id) or tm
-
-        if not tm.mailbox:
-            continue
-
-        # Mark busy and snapshot mailbox.
-        tm.busy = True
-        registry.update_teammate(tm)
+        # One teammate's failure must not abort the whole tick — guard the
+        # entire per-teammate flow and turn a raise into an error result.
         try:
-            mailbox = list(tm.mailbox[:max_per_teammate])
-            prompt = _format_prompt(tm, mailbox)
-            answer = fork_subagent(
-                engine, prompt,
-                title=f"{tm.team}/{tm.name}",
-                role=tm.role,
+            # Optionally claim a task to add to mailbox.
+            claimed_id: str | None = None
+            if auto_claim and not tm.mailbox:
+                claimed_id = _claim_one_task(tasks, tm)
+                if claimed_id:
+                    t = tasks.get(claimed_id)
+                    if t:
+                        registry.deliver(
+                            tm.team, tm.id, sender="coordinator",
+                            kind="task",
+                            content=f"[claimed task {t.id}]\n{t.title}\n\n{t.description}",
+                        )
+                        tm = registry.get_teammate(tm.team, tm.id) or tm
+
+            if not tm.mailbox:
+                continue
+
+            # Mark busy and snapshot mailbox.
+            tm.busy = True
+            registry.update_teammate(tm)
+            try:
+                mailbox = list(tm.mailbox[:max_per_teammate])
+                prompt = _format_prompt(tm, mailbox)
+                answer = fork_subagent(
+                    engine, prompt,
+                    title=f"{tm.team}/{tm.name}",
+                    role=tm.role,
+                )
+                # Drain processed mail; keep any that came in during the run.
+                tm = registry.get_teammate(tm.team, tm.id) or tm
+                tm.mailbox = tm.mailbox[len(mailbox):]
+                tm.transcript.append({
+                    "ts": __import__("time").time(),
+                    "role": "outbound",
+                    "content": answer,
+                })
+                results.append(CoordResult(
+                    teammate=f"{tm.team}/{tm.name}",
+                    inbox_count=len(mailbox),
+                    answer=answer,
+                    claimed_task_id=claimed_id,
+                ))
+                # If we claimed a task, mark it done (or failed if 'ERROR').
+                if claimed_id:
+                    t = tasks.get(claimed_id)
+                    if t:
+                        status = "done" if not answer.startswith("ERROR") else "failed"
+                        tasks.update(claimed_id, status=status, result=answer[:2000])
+            finally:
+                tm.busy = False
+                registry.update_teammate(tm)
+        except Exception as e:
+            _log.warning(
+                "coordinator: teammate %s/%s failed: %s",
+                tm.team, tm.name, e, exc_info=True,
             )
-            # Drain processed mail; keep any that came in during the run.
-            tm = registry.get_teammate(tm.team, tm.id) or tm
-            tm.mailbox = tm.mailbox[len(mailbox):]
-            tm.transcript.append({
-                "ts": __import__("time").time(),
-                "role": "outbound",
-                "content": answer,
-            })
             results.append(CoordResult(
                 teammate=f"{tm.team}/{tm.name}",
-                inbox_count=len(mailbox),
-                answer=answer,
-                claimed_task_id=claimed_id,
+                inbox_count=len(tm.mailbox),
+                answer=f"ERROR: coordinator failed processing teammate: {type(e).__name__}: {e}",
+                claimed_task_id=None,
             ))
-            # If we claimed a task, mark it done (or failed if 'ERROR').
-            if claimed_id:
-                t = tasks.get(claimed_id)
-                if t:
-                    status = "done" if not answer.startswith("ERROR") else "failed"
-                    tasks.update(claimed_id, status=status, result=answer[:2000])
-        finally:
-            tm.busy = False
-            registry.update_teammate(tm)
 
     return results
 

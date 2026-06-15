@@ -7,21 +7,36 @@ raw POST/PATCH/DELETE) go through ToolContext.confirm().
 from __future__ import annotations
 
 import json
+import logging
 import os
+from urllib.parse import quote
 from typing import Any
 
 import requests
 
 from .tools import ToolContext, _truncate
 
-try:
-    from urllib3.exceptions import InsecureRequestWarning  # type: ignore
-    requests.packages.urllib3.disable_warnings(InsecureRequestWarning)  # type: ignore
-except Exception:
-    pass
+_log = logging.getLogger(__name__)
 
 API = "https://api.github.com"
 UA = "collama/0.1"
+
+_insecure_warnings_disabled = False
+
+
+def _disable_insecure_warnings() -> None:
+    """Suppress urllib3's InsecureRequestWarning — but ONLY once the user has
+    actually opted into insecure SSL (see ``_request``). Doing this at import
+    time would silence the warning process-wide for everyone."""
+    global _insecure_warnings_disabled
+    if _insecure_warnings_disabled:
+        return
+    try:
+        from urllib3.exceptions import InsecureRequestWarning  # type: ignore
+        requests.packages.urllib3.disable_warnings(InsecureRequestWarning)  # type: ignore
+        _insecure_warnings_disabled = True
+    except Exception as e:
+        _log.warning("could not disable InsecureRequestWarning: %s", e, exc_info=True)
 
 
 def _token(ctx: ToolContext) -> str | None:
@@ -52,6 +67,7 @@ def _request(method: str, path: str, ctx: ToolContext, **kw) -> tuple[int, Any]:
     url = path if path.startswith("http") else f"{API}{path}"
     if ctx.insecure_ssl:
         kw.setdefault("verify", False)
+        _disable_insecure_warnings()
     try:
         r = requests.request(method, url, headers=_headers(ctx), timeout=30, **kw)
     except requests.RequestException as e:
@@ -104,7 +120,7 @@ def t_gh_list_repos(args: dict, ctx: ToolContext) -> str:
 
 
 def t_gh_get_repo(args: dict, ctx: ToolContext) -> str:
-    repo = args["repo"]
+    repo = quote(args["repo"], safe="/")
     status, body = _request("GET", f"/repos/{repo}", ctx)
     if status == 200 and isinstance(body, dict):
         keep = ["full_name", "description", "default_branch", "private", "fork",
@@ -115,8 +131,8 @@ def t_gh_get_repo(args: dict, ctx: ToolContext) -> str:
 
 def t_gh_get_file(args: dict, ctx: ToolContext) -> str:
     import base64
-    repo = args["repo"]
-    path = args["path"]
+    repo = quote(args["repo"], safe="/")
+    path = quote(args["path"], safe="/")
     ref = args.get("ref")
     params = {"ref": ref} if ref else None
     status, body = _request("GET", f"/repos/{repo}/contents/{path}", ctx, params=params)
@@ -130,7 +146,7 @@ def t_gh_get_file(args: dict, ctx: ToolContext) -> str:
 
 
 def t_gh_list_issues(args: dict, ctx: ToolContext) -> str:
-    repo = args["repo"]
+    repo = quote(args["repo"], safe="/")
     state = args.get("state", "open")
     per_page = min(int(args.get("limit", 30)), 100)
     status, body = _request("GET", f"/repos/{repo}/issues", ctx,
@@ -155,7 +171,8 @@ def t_gh_create_issue(args: dict, ctx: ToolContext) -> str:
     labels = args.get("labels") or []
     if not ctx.confirm("create GitHub issue", f"{repo}: {title!r}"):
         return "ERROR: user denied"
-    status, resp = _request("POST", f"/repos/{repo}/issues", ctx,
+    repo_q = quote(repo, safe="/")
+    status, resp = _request("POST", f"/repos/{repo_q}/issues", ctx,
                             json={"title": title, "body": body, "labels": labels})
     if status == 201 and isinstance(resp, dict):
         return f"OK: created {resp.get('html_url')}"
@@ -163,7 +180,7 @@ def t_gh_create_issue(args: dict, ctx: ToolContext) -> str:
 
 
 def t_gh_list_pulls(args: dict, ctx: ToolContext) -> str:
-    repo = args["repo"]
+    repo = quote(args["repo"], safe="/")
     state = args.get("state", "open")
     per_page = min(int(args.get("limit", 30)), 100)
     status, body = _request("GET", f"/repos/{repo}/pulls", ctx,
@@ -176,7 +193,7 @@ def t_gh_list_pulls(args: dict, ctx: ToolContext) -> str:
 
 
 def t_gh_get_pull(args: dict, ctx: ToolContext) -> str:
-    repo = args["repo"]
+    repo = quote(args["repo"], safe="/")
     number = int(args["number"])
     status, body = _request("GET", f"/repos/{repo}/pulls/{number}", ctx)
     if status == 200 and isinstance(body, dict):

@@ -19,8 +19,12 @@ Helpers:
 """
 from __future__ import annotations
 
+import json
+import logging
 import re
 from dataclasses import dataclass
+
+log = logging.getLogger(__name__)
 
 BOUNDARY_MARKER = "<<COMPACT_BOUNDARY>>"
 
@@ -34,8 +38,28 @@ class CompactReport:
     summary_added: bool = False
 
 
+def approx_message_tokens(m: dict) -> int:
+    """Rough chars/4 token estimate for a single message.
+
+    Counts not just `content` but also the assistant `tool_calls` payload
+    (function name + serialized arguments) and any attached `images` — both
+    occupy real context budget. Ignoring them under-counts large turns and
+    lets the buffer blow past the limit before compaction ever triggers.
+    """
+    total = len(str(m.get("content") or ""))
+    for tc in m.get("tool_calls") or []:
+        try:
+            total += len(json.dumps(tc, default=str))
+        except (TypeError, ValueError):
+            total += len(str(tc))
+    for img in m.get("images") or []:
+        # base64 image strings are the bulk of a multimodal turn.
+        total += len(str(img))
+    return total // 4
+
+
 def _approx_tokens(messages: list[dict]) -> int:
-    return sum(len(str(m.get("content") or "")) // 4 for m in messages)
+    return sum(approx_message_tokens(m) for m in messages)
 
 
 def find_compact_boundary(messages: list[dict]) -> int:
@@ -173,7 +197,12 @@ def auto_compact(
         head.append(messages[0])
 
     boundary_idx = find_compact_boundary(messages)
-    middle_start = boundary_idx + 1 if boundary_idx > 0 else len(head)
+    # >= 0 (not > 0): when the boundary marker sits at index 0 it's still a
+    # real boundary, so the middle must start AFTER it. With the old `> 0`
+    # check, a boundary at index 0 fell through to `len(head)`, pulling the
+    # already-compacted summary back into the slice and re-summarizing it
+    # every cycle — compounding information loss.
+    middle_start = boundary_idx + 1 if boundary_idx >= 0 else len(head)
 
     tail = messages[-keep_recent:]
     middle = messages[middle_start:-keep_recent] if len(messages) > middle_start + keep_recent else []
@@ -186,6 +215,10 @@ def auto_compact(
         try:
             summary_text = summarize_with_model(middle)
         except Exception:
+            # Deliberate fallback to the deterministic bulletize summary, but
+            # log it — a silently-failing LLM summarizer would otherwise be
+            # invisible and degrade summary quality with no signal.
+            log.warning("LLM summarizer failed; falling back to bulletize", exc_info=True)
             summary_text = None
     if not summary_text:
         summary_text = _bulletize(middle)
@@ -220,13 +253,18 @@ def manage_context(
 ) -> list[CompactReport]:
     """Run the three strategies in order: snip → collapse → auto."""
     reports: list[CompactReport] = []
+    # Capture the REAL token count before each mutation rather than fabricating
+    # `before` from `after + count * constant` — the old form reported a made-up
+    # number that drifted from the actual saving.
+    before_snip = _approx_tokens(messages)
     snipped = snip_compact(messages)
     if snipped:
-        reports.append(CompactReport(True, _approx_tokens(messages) + snipped * 50,
+        reports.append(CompactReport(True, before_snip,
                                      _approx_tokens(messages), "snipCompact"))
+    before_collapse = _approx_tokens(messages)
     merged = context_collapse(messages)
     if merged:
-        reports.append(CompactReport(True, _approx_tokens(messages) + merged * 100,
+        reports.append(CompactReport(True, before_collapse,
                                      _approx_tokens(messages), "contextCollapse"))
     r = auto_compact(
         messages,

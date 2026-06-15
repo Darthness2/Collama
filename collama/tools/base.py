@@ -3,6 +3,7 @@ path resolution, the edit-history recorder, and the failed-command analyzer.
 """
 from __future__ import annotations
 
+import logging
 import os
 import re as _re_err
 from dataclasses import dataclass
@@ -10,6 +11,8 @@ from pathlib import Path
 
 from .. import ui
 
+
+logger = logging.getLogger(__name__)
 
 MAX_OUTPUT_CHARS = 16000
 MAX_EDIT_HISTORY = 50
@@ -27,6 +30,64 @@ def _resolve(path: str, root: Path) -> Path:
     if not p.is_absolute():
         p = root / p
     return p
+
+
+class PathEscapeError(Exception):
+    """Raised when a resolved path would escape the workspace root.
+
+    Carries a ready-to-return ``ERROR: path escapes workspace ...`` message so
+    callers can simply ``return exc.message``.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+def _is_within(child_real: str, root_real: str) -> bool:
+    """True if ``child_real`` is ``root_real`` or lives underneath it.
+
+    Both arguments must already be real (symlink-resolved, absolute) paths.
+    Uses a normalized ``commonpath`` comparison and a ``startswith(root + sep)``
+    fallback so it behaves correctly on Python 3.9 and across drive roots.
+    """
+    if child_real == root_real:
+        return True
+    try:
+        if os.path.commonpath([child_real, root_real]) == root_real:
+            return True
+    except ValueError:
+        # Different drives / mix of absolute+relative — definitely not within.
+        return False
+    # Defensive fallback (also guards against commonpath edge cases).
+    root_with_sep = root_real.rstrip(os.sep) + os.sep
+    return child_real.startswith(root_with_sep)
+
+
+def _resolve_contained(path: str, root: Path) -> Path:
+    """Resolve ``path`` like :func:`_resolve` but REQUIRE the real result to
+    stay inside ``root``. Expands ``~`` / ``$VARS`` and accepts absolute paths,
+    yet refuses any result (including via symlinks) that lands above ``root``.
+
+    Relative paths and in-workspace absolute paths keep working; only traversal
+    ABOVE the workspace is blocked.
+
+    Raises :class:`PathEscapeError` (whose ``.message`` is a user-facing
+    ``ERROR: path escapes workspace ...`` string) when containment fails.
+    """
+    p = _resolve(path, root)
+    # os.path.realpath resolves symlinks and ".." for both existing and
+    # not-yet-existing paths, so a symlink that points outside the workspace —
+    # or a "../" traversal — is caught even when the target doesn't exist.
+    child_real = os.path.realpath(str(p))
+    root_real = os.path.realpath(str(root))
+    if not _is_within(child_real, root_real):
+        raise PathEscapeError(
+            f"ERROR: path escapes workspace: {path} resolves to {child_real}, "
+            f"which is outside {root_real}. Only paths inside the workspace are "
+            f"allowed; use set_workspace to change the workspace root."
+        )
+    return Path(child_real)
 
 
 @dataclass

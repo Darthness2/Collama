@@ -6,15 +6,24 @@ Each session is JSON at ~/.config/collama/sessions/<id>.json with:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import stat
+import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
 from .config import config_dir
+
+_log = logging.getLogger(__name__)
+
+# Serializes session writes within this process so concurrent saves can't
+# race on the temp-file / replace dance and corrupt a session file.
+_save_lock = threading.Lock()
 
 
 def sessions_dir() -> Path:
@@ -43,10 +52,32 @@ def make(model: str, title: str | None = None) -> dict[str, Any]:
     }
 
 
+def _content_to_text(content: Any) -> str:
+    """Coerce a message ``content`` to plain text.
+
+    Most messages carry a str, but multimodal / structured turns may carry a
+    list of blocks (e.g. ``[{"type": "text", "text": "..."}, ...]``). Pull the
+    text out of those instead of stringifying the whole list.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                parts.append(str(block.get("text") or block.get("content") or ""))
+        return " ".join(p for p in parts if p)
+    return str(content)
+
+
 def derive_title(messages: list[dict]) -> str:
     for m in messages:
         if m.get("role") == "user":
-            text = (m.get("content") or "").strip()
+            text = _content_to_text(m.get("content")).strip()
             text = re.sub(r"\s+", " ", text)
             return text[:60] if text else "untitled"
     return "untitled"
@@ -57,13 +88,27 @@ def save(session: dict) -> Path:
     if session.get("title") in (None, "", "untitled"):
         session["title"] = derive_title(session.get("messages", []))
     p = _path(session["id"])
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(session, indent=2))
-    tmp.replace(p)
-    try:
-        os.chmod(p, stat.S_IRUSR | stat.S_IWUSR)
-    except OSError:
-        pass
+    d = p.parent
+    payload = json.dumps(session, indent=2)
+    # Unique temp name + lock avoids the fixed-temp corruption race when two
+    # saves overlap. chmod 600 kept (cheap, harmless) even though sessions
+    # don't hold secrets.
+    with _save_lock:
+        fd, tmp_name = tempfile.mkstemp(dir=str(d), prefix=f"{session['id']}.", suffix=".json.tmp")
+        os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_name, p)
+        except OSError as e:
+            _log.warning("session save failed: %s", e, exc_info=True)
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
     return p
 
 

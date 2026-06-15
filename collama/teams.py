@@ -12,12 +12,22 @@ Transcript shape: [{ts, role, from?, content}, ...]
 from __future__ import annotations
 
 import json
+import logging
+import os
+import tempfile
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .config import config_dir
 from .tasks import new_id, TaskKind
+
+_log = logging.getLogger(__name__)
+
+# Serializes teammate writes so concurrent saves (e.g. coordinator ticking
+# several teammates) can't race on a shared temp name and corrupt a file.
+_write_lock = threading.Lock()
 
 
 def teams_root() -> Path:
@@ -159,6 +169,20 @@ class TeamRegistry:
         d = self.root / tm.team
         d.mkdir(parents=True, exist_ok=True)
         p = d / f"{tm.id}.json"
-        tmp = p.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(tm.to_dict(), indent=2))
-        tmp.replace(p)
+        payload = json.dumps(tm.to_dict(), indent=2)
+        # Unique temp name + lock avoids the fixed-temp corruption race.
+        with _write_lock:
+            fd, tmp_name = tempfile.mkstemp(dir=str(d), prefix=f"{tm.id}.", suffix=".json.tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(payload)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_name, p)
+            except OSError as e:
+                _log.warning("teammate write failed: %s", e, exc_info=True)
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
+                raise

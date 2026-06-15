@@ -36,8 +36,10 @@ from __future__ import annotations
 
 import atexit
 import json
+import logging
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -48,6 +50,8 @@ from queue import Empty, Queue
 from typing import Any
 
 from .config import config_dir
+
+_log = logging.getLogger(__name__)
 
 
 # Protocol version Collama negotiates. Servers built against newer or
@@ -125,6 +129,10 @@ class _Server:
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,  # line-buffered — important for NDJSON over a pipe
+                # Own session/process group so we can signal the whole tree:
+                # `npx` spawns `node` grandchildren that would otherwise leak
+                # when we only kill the immediate child.
+                start_new_session=True,
             )
         except OSError as e:
             self.state = "error"
@@ -167,8 +175,31 @@ class _Server:
 
         self.state = "ready"
 
+    def _signal_group(self, sig: int) -> None:
+        """Signal the whole process group (npx → node → ...) if we have one,
+        falling back to the single process otherwise."""
+        proc = self.proc
+        if proc is None:
+            return
+        try:
+            os.killpg(os.getpgid(proc.pid), sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+        except (OSError, AttributeError):
+            # No process groups (e.g. Windows) or pgid lookup failed —
+            # signal just the immediate child.
+            try:
+                if sig == signal.SIGKILL:
+                    proc.kill()
+                else:
+                    proc.terminate()
+            except OSError:
+                pass
+
     def stop(self, timeout: float = 3.0) -> None:
-        """Best-effort: close stdin, wait briefly, terminate, then kill."""
+        """Best-effort: close stdin, wait briefly, terminate, then kill — and
+        always reap the child so we don't leak zombies. Kills the whole
+        process group so grandchildren (npx→node) go down too."""
         proc = self.proc
         if proc is None:
             self.state = "stopped"
@@ -182,11 +213,20 @@ class _Server:
             try:
                 proc.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
-                proc.terminate()
+                self._signal_group(signal.SIGTERM)
                 try:
                     proc.wait(timeout=timeout)
                 except subprocess.TimeoutExpired:
-                    proc.kill()
+                    self._signal_group(signal.SIGKILL)
+                    # Reap after the kill so the child doesn't linger as a
+                    # zombie holding fds / pgid.
+                    try:
+                        proc.wait(timeout=timeout)
+                    except subprocess.TimeoutExpired:
+                        _log.warning(
+                            "MCP server '%s' did not exit after SIGKILL",
+                            self.cfg.name,
+                        )
         finally:
             self.proc = None
             self.state = "stopped"
@@ -316,7 +356,12 @@ class _Server:
                 try:
                     slot.put_nowait(msg)
                 except Exception:
-                    pass
+                    # Slot already filled (duplicate/stale response id) — the
+                    # waiter has its answer; drop the extra rather than block.
+                    _log.warning(
+                        "MCP server '%s': dropped duplicate response id=%r",
+                        self.cfg.name, rid, exc_info=True,
+                    )
 
     def _stderr_loop(self) -> None:
         proc = self.proc
@@ -435,7 +480,10 @@ class MCPRegistry:
                 try:
                     srv.stop()
                 except Exception:
-                    pass
+                    _log.warning(
+                        "error stopping MCP server '%s' during shutdown",
+                        srv.cfg.name, exc_info=True,
+                    )
 
     # -- public read-only access -----------------------------------------
 
@@ -508,7 +556,7 @@ def registry() -> MCPRegistry:
             except MCPError:
                 # Bad mcp.json shouldn't crash the agent — surfaced via
                 # mcp_servers control tool instead.
-                pass
+                _log.warning("failed to load mcp.json from %s", cfg_path, exc_info=True)
             atexit.register(r.shutdown)
             _registry = r
         return _registry

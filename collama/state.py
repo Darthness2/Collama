@@ -7,9 +7,12 @@ same source of truth instead of passing fields around.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
+
+_log = logging.getLogger(__name__)
 
 
 Listener = Callable[["AppState", str, Any], None]
@@ -95,7 +98,13 @@ class AppState:
                 try:
                     fn(self, key, value)
                 except Exception:
-                    pass
+                    # A misbehaving subscriber (e.g. a failing autosave) must
+                    # not break the update for other listeners — but it should
+                    # be logged, not silently dropped.
+                    _log.warning(
+                        "AppState listener failed handling %r update", key,
+                        exc_info=True,
+                    )
 
     def push_file(self, path: str) -> None:
         if path in self.file_history:

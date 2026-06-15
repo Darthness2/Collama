@@ -42,6 +42,7 @@ Implements the Claude-Code-style data flow:
 from __future__ import annotations
 
 import json
+import logging
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -60,13 +61,15 @@ from .permissions import (
     auto_reject_plan,
     can_use_tool,
 )
-from .services.compact import BOUNDARY_MARKER, manage_context
+from .services.compact import BOUNDARY_MARKER, approx_message_tokens, manage_context
 from .services.transcript import record as record_transcript
 from .state import AppState
 from .tasks import TaskGraph, TaskKind, new_id
 from .teams import TeamRegistry
 from .tools import ToolContext, all_tool_schemas, dispatch
 
+
+log = logging.getLogger(__name__)
 
 MAX_TOOL_ITERATIONS = 1000
 LOOP_THRESHOLD = 4  # tightened from 2 — at 2 a single retry tripped it,
@@ -724,6 +727,14 @@ class QueryEngine:
         self.messages: list[dict] = [{"role": "system", "content": fetch_system_prompt_parts(state)}]
         self._recent_calls: list[tuple[str, str]] = []
         self._recent_results: list[tuple[str, str]] = []
+        # Result keys we've already soft-steered on this turn, so the system
+        # steer is injected ONCE per repeated result rather than on every
+        # identical result that follows.
+        self._steered_result_keys: set[tuple[str, str]] = set()
+        # Call signatures already counted in the current execute batch, so a
+        # legitimate same-turn fan-out of identical calls isn't mistaken for a
+        # consecutive-loop.
+        self._batch_counted_calls: set[tuple[str, str]] = set()
         self._abort_turn = False
         self._plan_shown_this_turn = False
         self._usage = {"input": 0, "output": 0, "ms": 0}
@@ -753,14 +764,19 @@ class QueryEngine:
 
         Used by the bottom status bar to show a live 'ctx ~N' number, and
         matches the heuristic already used by the compaction pre-check
-        below so the two displays stay consistent."""
-        return sum(len(str(m.get("content") or "")) // 4 for m in self.messages)
+        below so the two displays stay consistent.
+
+        Includes assistant tool_calls and any attached images, not just
+        text content — see approx_message_tokens — so the live number and
+        the compaction trigger agree on how big the context actually is."""
+        return sum(approx_message_tokens(m) for m in self.messages)
 
     def submit_message(self, prompt: str) -> Iterator[Message]:
         """Drive one user-turn through the full pipeline."""
         self._plan_shown_this_turn = False
         self._recent_calls = []
         self._recent_results = []
+        self._steered_result_keys = set()
         self._abort_turn = False
         self._read_cache = {}
         # Reset per-turn state: edit-failure map AND files_read set, so cache
@@ -787,7 +803,7 @@ class QueryEngine:
         # compact (otherwise compaction looks invisible until it finishes,
         # and the LLM-summarization variant was slow enough to feel like
         # a hang).
-        _pre = sum(len(str(m.get("content") or "")) // 4 for m in self.messages)
+        _pre = sum(approx_message_tokens(m) for m in self.messages)
         will_compact = _pre > COMPACT_TOKENS
         if will_compact:
             yield Message("info", {
@@ -1076,6 +1092,9 @@ class QueryEngine:
                     options={"temperature": self.temperature},
                 )
         except OllamaError:
+            # Deliberate fallback (caller treats None as "retry failed"), but
+            # log it so a persistently-failing retry path is diagnosable.
+            log.warning("non-stream retry chat failed", exc_info=True)
             return None
 
     def _summarize_with_model(self, middle: list[dict]) -> str | None:
@@ -1097,6 +1116,9 @@ class QueryEngine:
             )
             return (res.get("content") or "").strip() or None
         except Exception:
+            # Deliberate fallback (caller drops back to deterministic
+            # bulletize), but log so a broken summarizer isn't invisible.
+            log.warning("LLM summarize call failed", exc_info=True)
             return None
 
     def _extract_calls(self, msg: dict, content: str):
@@ -1173,6 +1195,9 @@ class QueryEngine:
         try:
             approved, feedback = self.plan_resolver(plan_text)
         except Exception:
+            # Fail safe: an erroring resolver must not auto-approve. Log so a
+            # broken resolver doesn't silently reject every plan.
+            log.warning("plan resolver raised; treating as rejected", exc_info=True)
             approved, feedback = False, ""
         feedback = (feedback or "").strip()
 
@@ -1211,6 +1236,15 @@ class QueryEngine:
 
     def _check_loop(self, name: str, args: dict) -> bool:
         key = (name, json.dumps(args, sort_keys=True, default=str))
+        # A model may legitimately emit several identical tool calls in a
+        # SINGLE assistant turn (fan-out — e.g. read the same template for
+        # three targets). That's not a loop. Count a given signature at most
+        # ONCE per batch so a same-turn fan-out can't, by itself, push `run`
+        # over ARGS_LOOP_THRESHOLD and get the whole batch dropped. The signal
+        # we actually want is the SAME call recurring ACROSS turns.
+        if key in self._batch_counted_calls:
+            return False
+        self._batch_counted_calls.add(key)
         self._recent_calls.append(key)
         run = 1
         for prev in reversed(self._recent_calls[:-1]):
@@ -1268,6 +1302,9 @@ class QueryEngine:
     def _execute_and_record(self, calls):
         """Run calls through the executor; reflect tool effects into state and
         record results into messages and the on-disk transcript."""
+        # Fresh per-turn (per-batch) dedup set: identical calls within THIS
+        # batch count once, so a legitimate same-turn fan-out isn't dropped.
+        self._batch_counted_calls = set()
         # Drop calls that loop.
         cleaned_calls = []
         for name, args, role in calls:
@@ -1324,7 +1361,16 @@ class QueryEngine:
                 if result.startswith("[CACHED") or (d.get("first_line") or "").startswith("[CACHED"):
                     continue
                 seen = self._result_loop_count(name, result)
-                if seen == LOOP_THRESHOLD:
+                steer_key = (name, (result or "")[:240])
+                # Fire on >= (not ==): the 30-item window evicts and results
+                # repeat in bursts, so the count can jump PAST the exact
+                # threshold and an `== LOOP_THRESHOLD` test silently never
+                # matches. Gate on a per-key set so the system steer is
+                # injected ONCE per repeated result, not on every identical
+                # result thereafter (which would spam the context).
+                if (seen >= LOOP_THRESHOLD and seen < LOOP_ABORT_THRESHOLD
+                        and steer_key not in self._steered_result_keys):
+                    self._steered_result_keys.add(steer_key)
                     yield Message("warn", {
                         "text": f"loop: {name} returned the same result {seen}× — steering hard"
                     })
